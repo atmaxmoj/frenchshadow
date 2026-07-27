@@ -230,9 +230,9 @@ def _generic_tip(expected: str, actual: str) -> ArticulatoryTip:
             practice="listen and repeat",
         )
 
-    exp_vec = _ft.fts(expected)
-    act_vec = _ft.fts(actual)
-    if not exp_vec or not act_vec:
+    exp_seg = _ft.fts(expected)
+    act_seg = _ft.fts(actual)
+    if exp_seg is None or act_seg is None:
         return ArticulatoryTip(
             description=f"目标音 {expected} 和你说出的 {actual} 不一致。",
             tongue="尝试模仿目标音的舌位。",
@@ -241,10 +241,16 @@ def _generic_tip(expected: str, actual: str) -> ArticulatoryTip:
             practice="listen and repeat",
         )
 
+    def feat(seg, name: str):
+        try:
+            return seg[name]
+        except Exception:
+            return None
+
     diff = []
     for name, hint in _FEATURE_HINTS.items():
-        ev = exp_vec[0].get(name)
-        av = act_vec[0].get(name)
+        ev = feat(exp_seg, name)
+        av = feat(act_seg, name)
         if ev is not None and av is not None and ev != av:
             if ev == "+":
                 diff.append(f"需要{hint}")

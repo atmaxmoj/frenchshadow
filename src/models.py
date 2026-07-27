@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -21,7 +22,10 @@ from transformers import AutoModelForCTC, AutoProcessor
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+MODEL_NAME = os.environ.get(
+    "SHADOW_READER_MODEL",
+    "facebook/wav2vec2-lv-60-espeak-cv-ft",
+)
 TARGET_SR = 16000
 
 _processor: AutoProcessor | None = None
