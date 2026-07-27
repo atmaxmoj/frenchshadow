@@ -26,7 +26,15 @@ from src.liaison import detect_liaisons, reference_text_for_word
 from src.diagrams import diagram as mouth_diagram, has_diagram
 from src.tts import synthesize
 from src.youtube import TranscriptError, extract_video_id, fetch_transcript, fetch_video_info
-from src.storage import get_attempts, get_recording_path, save_attempt
+from src.storage import (
+    get_attempts,
+    get_recording_path,
+    get_recent_videos,
+    get_stats,
+    get_video_progress,
+    save_attempt,
+    touch_video,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -206,6 +214,10 @@ async def create_attempt(
     sentence_text: str = Form(...),
     language: str = Form("fr-fr"),
     analysis: str = Form(...),
+    duration_s: float = Form(0),
+    title: str = Form(""),
+    thumbnail: str = Form(""),
+    total_sentences: int = Form(0),
 ) -> dict:
     """Persist a practice attempt (audio + analysis) and return its id."""
     try:
@@ -218,6 +230,14 @@ async def create_attempt(
         raise HTTPException(status_code=400, detail="empty audio")
 
     try:
+        touch_video(
+            video_id=video_id,
+            title=title,
+            thumbnail=thumbnail,
+            language=language,
+            total_sentences=total_sentences,
+            last_sentence_idx=sentence_idx,
+        )
         attempt = save_attempt(
             video_id=video_id,
             sentence_idx=sentence_idx,
@@ -225,6 +245,7 @@ async def create_attempt(
             language=language,
             audio_bytes=audio_bytes,
             analysis=analysis_data,
+            duration_s=duration_s,
         )
     except Exception as exc:
         logger.exception("save_attempt failed")
@@ -236,6 +257,62 @@ async def create_attempt(
         "sentence_idx": attempt.sentence_idx,
         "overall_score": attempt.overall_score,
         "created_at": attempt.created_at,
+    }
+
+
+@app.get("/stats")
+def stats() -> dict:
+    """Return aggregate practice statistics for the dashboard."""
+    try:
+        return get_stats()
+    except Exception as exc:
+        logger.exception("stats failed")
+        raise HTTPException(status_code=500, detail=f"stats failed: {exc}") from exc
+
+
+@app.get("/recent_videos")
+def recent_videos(limit: int = 20) -> dict:
+    """Return recently practiced videos for the dashboard."""
+    try:
+        videos = get_recent_videos(limit=limit)
+    except Exception as exc:
+        logger.exception("recent_videos failed")
+        raise HTTPException(status_code=500, detail=f"recent_videos failed: {exc}") from exc
+
+    return {
+        "videos": [
+            {
+                "video_id": v.video_id,
+                "title": v.title,
+                "thumbnail": v.thumbnail,
+                "language": v.language,
+                "total_sentences": v.total_sentences,
+                "last_sentence_idx": v.last_sentence_idx,
+                "last_practiced_at": v.last_practiced_at,
+                "attempt_count": v.attempt_count,
+                "sentence_attempt_count": v.sentence_attempt_count,
+            }
+            for v in videos
+        ]
+    }
+
+
+@app.get("/videos/{video_id}/progress")
+def video_progress(video_id: str) -> dict:
+    """Return progress for a single video."""
+    progress = get_video_progress(video_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail="video not found")
+    return {
+        "video_id": progress.video_id,
+        "title": progress.title,
+        "thumbnail": progress.thumbnail,
+        "language": progress.language,
+        "total_sentences": progress.total_sentences,
+        "last_sentence_idx": progress.last_sentence_idx,
+        "last_practiced_at": progress.last_practiced_at,
+        "attempt_count": progress.attempt_count,
+        "sentence_attempt_count": progress.sentence_attempt_count,
     }
 
 

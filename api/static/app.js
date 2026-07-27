@@ -16,6 +16,10 @@ const els = {
   btnPlayUser: document.getElementById("btnPlayUser"),
   btnRepeat: document.getElementById("btnRepeat"),
   btnContinue: document.getElementById("btnContinue"),
+  topNav: document.getElementById("topNav"),
+  dashboard: document.getElementById("dashboard"),
+  statsGrid: document.getElementById("statsGrid"),
+  recentVideos: document.getElementById("recentVideos"),
 };
 
 const state = {
@@ -36,6 +40,7 @@ const state = {
   analysis: null,
   tokenTimes: [],
   selectedWord: null,
+  lastDurationS: 0,
 };
 
 // ---------- recording globals (reused per sentence) ----------
@@ -159,6 +164,117 @@ async function startPractice() {
 function setLandingStatus(html) {
   els.landingStatus.innerHTML = html;
 }
+
+// ---------- navigation / dashboard ----------
+function switchView(view) {
+  state.mode = view === "practice" ? "practice" : view;
+  els.landing.classList.toggle("hidden", view !== "landing");
+  els.dashboard.classList.toggle("hidden", view !== "dashboard");
+  els.practice.classList.toggle("hidden", view !== "practice");
+  els.topNav.querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === view);
+  });
+  if (view === "dashboard") loadDashboard();
+}
+
+async function loadDashboard() {
+  try {
+    const [statsRes, videosRes] = await Promise.all([
+      fetch("/stats"),
+      fetch("/recent_videos"),
+    ]);
+    const stats = statsRes.ok ? await statsRes.json() : {};
+    const videosData = videosRes.ok ? await videosRes.json() : { videos: [] };
+    renderStats(stats);
+    renderRecentVideos(videosData.videos || []);
+  } catch (err) {
+    console.error(err);
+    els.statsGrid.innerHTML = `<div class="empty-state">加载失败：${escapeHtml(err.message)}</div>`;
+    els.recentVideos.innerHTML = "";
+  }
+}
+
+function renderStats(stats) {
+  const items = [
+    { label: "视频数", value: stats.videos || 0 },
+    { label: "总尝试", value: stats.attempts || 0 },
+    { label: "句子数", value: stats.sentences || 0 },
+    { label: "分钟", value: stats.total_minutes || 0 },
+    { label: "天数", value: stats.days || 0 },
+    { label: "连续", value: stats.streak || 0 },
+  ];
+  els.statsGrid.innerHTML = items
+    .map(
+      (s) => `
+      <div class="stat-card">
+        <div class="stat-value">${escapeHtml(String(s.value))}</div>
+        <div class="stat-label">${escapeHtml(s.label)}</div>
+      </div>
+    `
+    )
+    .join("");
+}
+
+function renderRecentVideos(videos) {
+  if (!videos.length) {
+    els.recentVideos.innerHTML = `<div class="empty-state" style="grid-column:1/-1">还没有练习记录，先去输入链接练一段吧。</div>`;
+    return;
+  }
+  els.recentVideos.innerHTML = videos
+    .map((v) => {
+      const total = v.total_sentences || 0;
+      const last = v.last_sentence_idx || 0;
+      const pct = total > 0 ? Math.min(100, Math.round((last / Math.max(total - 1, 1)) * 100)) : 0;
+      const langLabel = v.language === "fr-fr" ? "Français" : v.language === "en-us" ? "English" : v.language;
+      return `
+        <div class="video-card">
+          <img src="${escapeHtml(v.thumbnail || "")}" alt="" />
+          <div class="meta">
+            <div class="title">${escapeHtml(v.title || v.video_id)}</div>
+            <div class="progress">
+              ${escapeHtml(langLabel)} · ${v.attempt_count || 0} 次尝试
+              <div class="progress-bar"><div style="width:${pct}%"></div></div>
+            </div>
+            <button class="btn-primary" onclick="window.continueVideo('${escapeHtml(v.video_id)}', '${escapeHtml(v.language || "fr-fr")}', ${last})">继续跟读</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+window.continueVideo = async function (videoId, language, startIdx) {
+  state.videoId = videoId;
+  state.language = language || "fr-fr";
+  setLandingStatus("恢复进度…");
+  try {
+    const infoRes = await fetch(`/youtube/info?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&language=${encodeURIComponent(state.language)}`);
+    const info = await infoRes.json();
+    if (!infoRes.ok) throw new Error(info.detail || `HTTP ${infoRes.status}`);
+    state.videoInfo = info;
+
+    const transRes = await fetch(`/youtube/transcript?video_id=${encodeURIComponent(videoId)}&language=${encodeURIComponent(state.language)}`);
+    const trans = await transRes.json();
+    if (!transRes.ok) throw new Error(trans.detail || `HTTP ${transRes.status}`);
+    state.sentences = trans.sentences || [];
+    if (!state.sentences.length) {
+      setLandingStatus("没有可用的字幕，无法继续。");
+      return;
+    }
+
+    switchView("practice");
+    if (state.playerReady && state.player.cueVideoById) {
+      state.player.cueVideoById(videoId);
+    }
+    const idx = Math.max(0, Math.min(startIdx, state.sentences.length - 1));
+    state.currentIdx = idx;
+    setCurrentSentence(idx);
+    playSourceSentence(idx);
+    prebakeAudiosFor(idx + 1);
+  } catch (err) {
+    setLandingStatus("继续失败：" + err.message);
+  }
+};
 
 function setStatus(html) {
   els.practiceStatus.innerHTML = html;
@@ -383,6 +499,7 @@ async function uploadAndAnalyze(blob) {
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     state.analysis = data.analysis || {};
     state.tokenTimes = data.tokens || [];
+    state.lastDurationS = data.duration_s || 0;
     renderAnalysis(data);
     await saveAttempt(blob, data);
     await loadAttempts();
@@ -396,6 +513,7 @@ async function uploadAndAnalyze(blob) {
 
 async function saveAttempt(blob, data) {
   const s = state.sentences[state.currentIdx];
+  const info = state.videoInfo || {};
   const form = new FormData();
   form.append("audio", blob, "recording.webm");
   form.append("video_id", state.videoId);
@@ -403,6 +521,10 @@ async function saveAttempt(blob, data) {
   form.append("sentence_text", s.text);
   form.append("language", state.language);
   form.append("analysis", JSON.stringify(data.analysis || {}));
+  form.append("duration_s", state.lastDurationS || data.duration_s || 0);
+  form.append("title", info.title || "");
+  form.append("thumbnail", info.thumbnail || "");
+  form.append("total_sentences", state.sentences.length);
   try {
     await fetch("/attempts", { method: "POST", body: form });
   } catch (err) {
@@ -758,6 +880,10 @@ function continueNext() {
 }
 
 // ---------- event listeners ----------
+els.topNav.querySelectorAll("button").forEach((btn) => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
 els.btnLoad.addEventListener("click", loadVideoInfo);
 els.urlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") loadVideoInfo();
