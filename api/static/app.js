@@ -331,30 +331,32 @@ function renderAnalysis(data) {
 
   els.resultList.innerHTML = "";
   words.forEach((w) => {
-    if (w.score >= 0.99 && w.errors.length === 0) return;
     const item = document.createElement("div");
+    const isPerfect = w.score >= 0.99 && w.errors.length === 0;
     item.className = "result-item";
     let errs = "";
-    w.errors.forEach((e) => {
-      const tips = e.tips || {};
-      errs += `
-        <div class="tip-box">
-          <h4>${e.label} <span style="color:var(--muted);font-weight:400;">(${e.expected || "-"} → ${e.actual || "-"})</span></h4>
-          <p><span class="label">问题：</span>${tips.description || ""}</p>
-          <p><span class="label">舌头：</span>${tips.tongue || ""}</p>
-          <p><span class="label">嘴唇：</span>${tips.lips || ""}</p>
-          <p><span class="label">下巴：</span>${tips.jaw || ""}</p>
-          <p><span class="label">练习：</span>${tips.practice || ""}</p>
-        </div>
-      `;
-    });
+    if (!isPerfect) {
+      w.errors.forEach((e) => {
+        const tips = e.tips || {};
+        errs += `
+          <div class="tip-box">
+            <h4>${e.label} <span style="color:var(--muted);font-weight:400;">(${e.expected || "-"} → ${e.actual || "-"})</span></h4>
+            <p><span class="label">问题：</span>${tips.description || ""}</p>
+            <p><span class="label">舌头：</span>${tips.tongue || ""}</p>
+            <p><span class="label">嘴唇：</span>${tips.lips || ""}</p>
+            <p><span class="label">下巴：</span>${tips.jaw || ""}</p>
+            <p><span class="label">练习：</span>${tips.practice || ""}</p>
+          </div>
+        `;
+      });
+    }
     item.innerHTML = `
       <div class="result-header">
         <span class="result-word">${w.word}</span>
         <span class="result-ipa">/${w.target_ipa}/</span>
         <span class="result-score" style="color:${scoreClass(w.score) === "good" ? "var(--good)" : scoreClass(w.score) === "warn" ? "var(--warn)" : "var(--bad)"}">${Math.round(w.score * 100)}</span>
       </div>
-      ${errs}
+      ${isPerfect ? '<p style="color:var(--good);margin:4px 0 0;">✓ 发音良好</p>' : errs}
     `;
     els.resultList.appendChild(item);
   });
