@@ -60,12 +60,24 @@ const SILENCE_DURATION_MS = 3200;
 const MIN_RECORDING_MS = 1200;
 
 // ---------- YouTube API ----------
-function createYouTubePlayer() {
-  if (!window.YT || !window.YT.Player) return;
+function ensureYouTubePlayer(videoId) {
+  if (!window.YT || !window.YT.Player) return false;
+
+  // If a player already exists, just cue the new video.
+  if (state.player && state.player.cueVideoById) {
+    state.player.cueVideoById(videoId);
+    state.playerReady = true;
+    return true;
+  }
+
+  const container = document.getElementById("player");
+  if (!container) return false;
+  container.innerHTML = "";
+
   state.player = new YT.Player("player", {
     width: "100%",
     height: "100%",
-    videoId: null,
+    videoId: videoId,
     playerVars: {
       rel: 0,
       modestbranding: 1,
@@ -81,14 +93,20 @@ function createYouTubePlayer() {
           stopSourcePoll();
         }
       },
+      onError: (event) => {
+        console.error("YouTube player error", event.data);
+        setStatus("视频播放失败 (code " + event.data + ")");
+      },
     },
   });
+  return true;
 }
 
 if (window.YT && window.YT.Player) {
-  createYouTubePlayer();
+  // Defer player creation until practice view is shown.
+  window.onYouTubeIframeAPIReady = () => {};
 } else {
-  window.onYouTubeIframeAPIReady = createYouTubePlayer;
+  window.onYouTubeIframeAPIReady = () => {};
 }
 
 // ---------- landing ----------
@@ -149,9 +167,7 @@ async function startPractice() {
       return;
     }
     state.currentIdx = 0;
-    state.mode = "practice";
-    els.landing.classList.add("hidden");
-    els.practice.classList.remove("hidden");
+    switchView("practice");
     renderSentenceList();
     setCurrentSentence(0);
     prebakeAudiosFor(0);
@@ -263,9 +279,6 @@ window.continueVideo = async function (videoId, language, startIdx) {
     }
 
     switchView("practice");
-    if (state.playerReady && state.player.cueVideoById) {
-      state.player.cueVideoById(videoId);
-    }
     const idx = Math.max(0, Math.min(startIdx, state.sentences.length - 1));
     state.currentIdx = idx;
     setCurrentSentence(idx);
@@ -282,12 +295,16 @@ function setStatus(html) {
 
 // ---------- sentence navigation ----------
 function renderSentenceList() {
+  if (!state.sentences.length) {
+    els.sentenceList.innerHTML = "";
+    return;
+  }
   els.sentenceList.innerHTML = state.sentences
     .map(
       (s, i) => `
-      <div class="sentence-item ${i === state.currentIdx ? "current" : ""}" data-idx="${i}">
-        <span class="idx">${i + 1}</span>${escapeHtml(s.text.substring(0, 80))}${s.text.length > 80 ? "…" : ""}
-      </div>
+      <span class="sentence-item ${i === state.currentIdx ? "current" : ""}" data-idx="${i}">
+        <span class="idx">${i + 1}</span>${escapeHtml(s.text)}
+      </span><span class="sentence-sep"> </span>
     `
     )
     .join("");
@@ -295,8 +312,15 @@ function renderSentenceList() {
     el.addEventListener("click", () => {
       const idx = parseInt(el.dataset.idx, 10);
       setCurrentSentence(idx);
+      playSourceSentence(idx);
     });
   });
+  scrollCurrentSentenceIntoView();
+}
+
+function scrollCurrentSentenceIntoView() {
+  const current = els.sentenceList.querySelector(".sentence-item.current");
+  if (current) current.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function setCurrentSentence(idx) {
@@ -312,9 +336,12 @@ function setCurrentSentence(idx) {
   loadAttempts();
   setStatus("按 ▶ 原句 听一遍，或按 🎤 跟读");
   els.btnPlayUser.disabled = true;
-  if (state.playerReady && state.player.cueVideoById) {
-    const s = state.sentences[idx];
-    state.player.cueVideoById({ videoId: state.videoId, startSeconds: s.start });
+  const s = state.sentences[idx];
+  if (state.mode === "practice") {
+    ensureYouTubePlayer(state.videoId);
+    if (state.playerReady && state.player.cueVideoById) {
+      state.player.cueVideoById({ videoId: state.videoId, startSeconds: s.start });
+    }
   }
 }
 
@@ -339,10 +366,17 @@ function renderSubtitle(idx) {
 
 // ---------- source playback ----------
 function playSourceSentence(idx) {
-  if (!state.playerReady) return;
   if (idx !== undefined) state.currentIdx = idx;
   const s = state.sentences[state.currentIdx];
   if (!s) return;
+
+  ensureYouTubePlayer(state.videoId);
+  if (!state.playerReady) {
+    setStatus("播放器准备中…");
+    setTimeout(() => playSourceSentence(state.currentIdx), 400);
+    return;
+  }
+
   stopRecording();
   stopSourcePoll();
   state.isPlayingSource = true;
@@ -360,7 +394,12 @@ function playSourceSentence(idx) {
 }
 
 function playSourceWord(wordObj) {
-  if (!state.playerReady || !wordObj) return;
+  if (!wordObj) return;
+  ensureYouTubePlayer(state.videoId);
+  if (!state.playerReady) {
+    setTimeout(() => playSourceWord(wordObj), 400);
+    return;
+  }
   stopSourcePoll();
   state.player.seekTo(wordObj.start, true);
   state.player.playVideo();

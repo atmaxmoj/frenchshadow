@@ -257,18 +257,23 @@
       flex-direction: column;
       gap: 6px;
     }
+    .transcript-list {
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--ink-2);
+    }
     .sentence-item {
-      font-size: 13px;
-      padding: 8px 10px;
+      display: inline;
+      padding: 2px 4px;
       border-radius: 4px;
       cursor: pointer;
       border: 1px solid transparent;
       color: var(--ink-2);
-      line-height: 1.35;
     }
     .sentence-item:hover { background: var(--bg-warm); }
     .sentence-item.current { background: var(--bg-warm); border-color: var(--accent); }
-    .sentence-item .idx { color: var(--muted); font-family: var(--font-mono); margin-right: 6px; }
+    .sentence-item .idx { color: var(--muted); font-family: var(--font-mono); margin-right: 4px; }
+    .sentence-sep { display: inline; color: var(--muted); margin: 0 4px; }
 
     .analysis-empty { color: var(--muted); font-size: 14px; }
     .overall-score {
@@ -529,8 +534,8 @@
   <div class="practice hidden" id="practice">
     <div class="practice-grid">
       <aside class="panel" id="leftPanel">
-        <h3>句子列表</h3>
-        <div id="sentenceList" class="sentence-list"></div>
+        <h3>全文</h3>
+        <div id="sentenceList" class="sentence-list transcript-list"></div>
       </aside>
       <main class="center">
         <div class="player-wrap">
@@ -556,6 +561,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

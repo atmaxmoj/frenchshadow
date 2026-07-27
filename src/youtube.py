@@ -17,8 +17,10 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 _WORD_SPLIT = re.compile(r"\s+")
+_MAX_SENTENCE_WORDS = 10
+_PAUSE_THRESHOLD_S = 1.2
 
 
 class TranscriptError(Exception):
@@ -85,13 +87,53 @@ def _split_text_into_sentence_pieces(text: str) -> list[tuple[str, int, bool]]:
     return result
 
 
+def _chunk_piece(
+    piece: str, word_count: int, is_terminal: bool, max_words: int
+) -> list[tuple[str, int, bool]]:
+    """Split a long piece into word-sized chunks, preserving terminal flag on last."""
+    if word_count <= max_words:
+        return [(piece, word_count, is_terminal)]
+    words = _WORD_SPLIT.split(piece)
+    chunks: list[tuple[str, int, bool]] = []
+    for i in range(0, len(words), max_words):
+        chunk_words = words[i : i + max_words]
+        chunk_text = " ".join(chunk_words)
+        chunks.append((chunk_text, len(chunk_words), False))
+    if chunks:
+        chunks[-1] = (chunks[-1][0], chunks[-1][1], is_terminal)
+    return chunks
+
+
 def _segment_sentences(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
-    """Group transcript entries into sentences and assign approximate word times."""
+    """Group transcript entries into sentences and assign approximate word times.
+
+    Sentences end at punctuation (. ! ? …), after a long pause between entries,
+    or when the buffer reaches a maximum word count. This handles transcripts
+    that lack punctuation or contain very long phrases.
+    """
     sentences: list[Sentence] = []
     buffer_texts: list[str] = []
     buffer_words: list[WordToken] = []
     buffer_start: float | None = None
     buffer_end: float | None = None
+    prev_end = 0.0
+
+    def flush() -> None:
+        nonlocal buffer_texts, buffer_words, buffer_start, buffer_end
+        if not buffer_texts:
+            return
+        sentences.append(
+            Sentence(
+                text=" ".join(buffer_texts),
+                start=buffer_start or 0,
+                end=buffer_end or 0,
+                words=buffer_words,
+            )
+        )
+        buffer_texts = []
+        buffer_words = []
+        buffer_start = None
+        buffer_end = None
 
     for entry in raw_entries:
         entry_start = float(entry["start"])
@@ -100,6 +142,10 @@ def _segment_sentences(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
         text = str(entry.get("text", "")).replace("\n", " ").strip()
         if not text:
             continue
+
+        # Start a new sentence after a long silence.
+        if buffer_texts and entry_start - prev_end > _PAUSE_THRESHOLD_S:
+            flush()
 
         pieces = _split_text_into_sentence_pieces(text)
         if not pieces:
@@ -112,47 +158,39 @@ def _segment_sentences(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
             piece_start = entry_start + elapsed
             piece_end = piece_start + piece_duration
             elapsed += piece_duration
+            per_word_duration = piece_duration / max(word_count, 1)
+            word_offset = 0
 
-            if buffer_start is None:
-                buffer_start = piece_start
-            buffer_end = piece_end
-            buffer_texts.append(piece)
+            for chunk_text, chunk_count, chunk_terminal in _chunk_piece(
+                piece, word_count, is_terminal, _MAX_SENTENCE_WORDS
+            ):
+                chunk_start = piece_start + word_offset * per_word_duration
+                chunk_end = piece_start + (word_offset + chunk_count) * per_word_duration
+                if buffer_start is None:
+                    buffer_start = chunk_start
+                buffer_end = chunk_end
+                buffer_texts.append(chunk_text)
 
-            # Distribute word timings within this piece linearly.
-            raw_words = _WORD_SPLIT.split(piece)
-            word_duration = piece_duration / max(len(raw_words), 1)
-            for i, w in enumerate(raw_words):
-                w_clean = w.strip(".,!?;:\"'()[]{}«»")
-                if not w_clean:
-                    continue
-                w_start = piece_start + i * word_duration
-                w_end = min(w_start + word_duration, piece_end)
-                buffer_words.append(WordToken(w_clean, w_start, w_end))
+                raw_words = _WORD_SPLIT.split(chunk_text)
+                for i, w in enumerate(raw_words):
+                    w_clean = w.strip(".,!?;:\"'()[]{}«»")
+                    if not w_clean:
+                        continue
+                    w_start = chunk_start + i * per_word_duration
+                    w_end = min(w_start + per_word_duration, piece_end)
+                    if w_end <= w_start:
+                        w_end = w_start + 0.01
+                    buffer_words.append(WordToken(w_clean, w_start, w_end))
 
-            if is_terminal:
-                sentences.append(
-                    Sentence(
-                        text=" ".join(buffer_texts),
-                        start=buffer_start,
-                        end=buffer_end,
-                        words=buffer_words,
-                    )
-                )
-                buffer_texts = []
-                buffer_words = []
-                buffer_start = None
-                buffer_end = None
+                word_offset += chunk_count
 
-    if buffer_texts:
-        sentences.append(
-            Sentence(
-                text=" ".join(buffer_texts),
-                start=buffer_start or 0,
-                end=buffer_end or 0,
-                words=buffer_words,
-            )
-        )
+                # Flush at terminal punctuation, max word count, or long chunk.
+                if chunk_terminal or len(buffer_words) >= _MAX_SENTENCE_WORDS:
+                    flush()
 
+        prev_end = entry_end
+
+    flush()
     return sentences
 
 
