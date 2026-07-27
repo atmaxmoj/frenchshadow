@@ -261,16 +261,44 @@ def analyze_words(
 
     ops = align(flat_ref, learner)
 
+    # Build arrays that let us map any op index to nearest reference word.
+    # Leading/trailing insertions (before first ref or after last ref) are
+    # treated as noise and dropped from scoring.
+    ref_word_for_op: list[int | None] = []
+    for op in ops:
+        if op.ref_index is not None:
+            ref_word_for_op.append(word_idx_per_ref[op.ref_index])
+        else:
+            ref_word_for_op.append(None)
+
+    first_ref_idx = next((i for i, w in enumerate(ref_word_for_op) if w is not None), None)
+    last_ref_idx = next((i for i in range(len(ref_word_for_op) - 1, -1, -1) if ref_word_for_op[i] is not None), None)
+
+    def nearest_word(op_index: int) -> int | None:
+        if first_ref_idx is None:
+            return None
+        if op_index < first_ref_idx or op_index > last_ref_idx:
+            return None
+        # nearest ref word before or after
+        lo = hi = op_index
+        while lo >= 0 or hi < len(ops):
+            if lo >= 0 and ref_word_for_op[lo] is not None:
+                return ref_word_for_op[lo]
+            if hi < len(ops) and ref_word_for_op[hi] is not None:
+                return ref_word_for_op[hi]
+            lo -= 1
+            hi += 1
+        return None
+
     word_ops: dict[int, list[AlignmentOp]] = {wi: [] for wi in range(len(ref_per_word))}
     word_learner: dict[int, list[str]] = {wi: [] for wi in range(len(ref_per_word))}
     word_learner_indices: dict[int, list[int]] = {wi: [] for wi in range(len(ref_per_word))}
-    last_word = 0
-    for op in ops:
-        if op.ref_index is not None:
-            wi = word_idx_per_ref[op.ref_index]
-            last_word = wi
-        else:
-            wi = last_word
+    for idx, op in enumerate(ops):
+        wi = ref_word_for_op[idx]
+        if wi is None:
+            wi = nearest_word(idx)
+        if wi is None:
+            continue
         word_ops[wi].append(op)
         if op.learner is not None and op.learner_index is not None:
             word_learner[wi].append(op.learner)
@@ -334,13 +362,15 @@ def analyze_words(
                 )
 
         target_count = max(len(target_phones), 1)
-        score = max(0.0, 1.0 - len(errors) / target_count)
+        # Cap error penalty so a single bad word doesn't dominate.
+        effective_errors = min(len(errors), target_count * 2)
+        score = max(0.0, 1.0 - effective_errors / target_count)
         results.append(
             WordResult(
                 word=word,
                 target_ipa="".join(target_phones),
                 learner_ipa="".join(word_learner.get(wi, [])),
-                errors=errors,
+                errors=errors[:3],  # show at most 3 errors per word in UI
                 score=round(score, 2),
                 learner_start=learner_start,
                 learner_end=learner_end,
