@@ -51,7 +51,7 @@ _ensure_espeak_env()
 # ---------------------------------------------------------------------------
 
 
-def reference_ipa_per_word(text: str) -> list[tuple[str, list[str]]]:
+def reference_ipa_per_word(text: str, language: str = "en-us") -> list[tuple[str, list[str]]]:
     """Return [(word, [ipa_phone, ...]), ...] for *text*.
 
     Uses the ``phonemizer`` package with the espeak backend. espeak-ng must be
@@ -63,7 +63,7 @@ def reference_ipa_per_word(text: str) -> list[tuple[str, list[str]]]:
     sep = Separator(word=" | ", phone=" ")
     raw = phonemize(
         text,
-        language="en-us",
+        language=language,
         backend="espeak",
         with_stress=False,
         preserve_punctuation=False,
@@ -455,7 +455,21 @@ def _alignment_cut_points(
 # ---------------------------------------------------------------------------
 
 
-def analyze(target_text: str, learner_tokens: Sequence[str]) -> dict:
+def _normalize_learner_tokens(tokens: Sequence[str]) -> list[str]:
+    """Strip stress markers and syllable separators from model tokens.
+
+    The wav2vec2 espeak model may emit tokens like ``o5`` (stress) or
+    ``s.`` (syllable boundary) which the unstressed reference does not contain.
+    """
+    out: list[str] = []
+    for t in tokens:
+        t = t.rstrip(".0123456789")
+        if t:
+            out.append(t)
+    return out
+
+
+def analyze(target_text: str, learner_tokens: Sequence[str], language: str = "en-us") -> dict:
     """Analyse learner pronunciation against *target_text*.
 
     Parameters
@@ -464,19 +478,21 @@ def analyze(target_text: str, learner_tokens: Sequence[str]) -> dict:
         The text the learner was supposed to say.
     learner_tokens : Sequence[str]
         IPA phone tokens recognised from the learner's audio.
+    language : str
+        espeak language code, e.g. ``en-us``, ``fr-fr``, ``es``.
 
     Returns
     -------
     dict
         Overall score, per-sentence breakdown, per-word results.
     """
-    learner = list(learner_tokens)
+    learner = _normalize_learner_tokens(learner_tokens)
     sentences = split_sentences(target_text)
 
     if len(sentences) <= 1:
-        words = analyze_words(reference_ipa_per_word(target_text), learner)
+        words = analyze_words(reference_ipa_per_word(target_text, language=language), learner)
     else:
-        per_sentence_refs = [reference_ipa_per_word(s) for s in sentences]
+        per_sentence_refs = [reference_ipa_per_word(s, language=language) for s in sentences]
         flat_ref: list[str] = []
         sentence_idx_per_ref: list[int] = []
         for si, ref in enumerate(per_sentence_refs):

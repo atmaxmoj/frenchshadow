@@ -1,4 +1,5 @@
-const SENTENCE = "The quick brown fox jumps over the lazy dog.";
+const SENTENCE = "Le petit chat noir mange une pomme rouge.";
+const LANGUAGE = "fr-fr";
 const SENTENCE_WORDS = SENTENCE.split(/\s+/);
 
 const els = {
@@ -88,7 +89,7 @@ function initSpeechRecognition() {
   const rec = new SpeechRecognition();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = "en-US";
+  rec.lang = "fr-FR";
 
   rec.onresult = (event) => {
     if (!isRecording) return;
@@ -290,6 +291,7 @@ async function uploadAndAnalyze(blob) {
   const form = new FormData();
   form.append("audio", blob, "recording.webm");
   form.append("target_text", SENTENCE);
+  form.append("language", LANGUAGE);
 
   try {
     const res = await fetch("/transcribe", { method: "POST", body: form });

@@ -94,6 +94,7 @@ def _attach_word_times(analysis: dict, duration_s: float, token_times: list[floa
 async def transcribe_endpoint(
     audio: UploadFile = File(...),
     target_text: str | None = Form(None),
+    language: str = Form("en-us"),
 ) -> dict:
     raw = await audio.read()
     if not raw:
@@ -125,7 +126,7 @@ async def transcribe_endpoint(
 
     if target_text:
         try:
-            analysis = analyze(target_text, result["tokens"])
+            analysis = analyze(target_text, result["tokens"], language=language)
             attach_tips(analysis)
             _attach_word_times(analysis, duration_s, result["token_times"])
             response["analysis"] = analysis
