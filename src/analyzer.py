@@ -279,16 +279,38 @@ def analyze_words(
             return None
         if op_index < first_ref_idx or op_index > last_ref_idx:
             return None
-        # nearest ref word before or after
-        lo = hi = op_index
-        while lo >= 0 or hi < len(ops):
-            if lo >= 0 and ref_word_for_op[lo] is not None:
-                return ref_word_for_op[lo]
-            if hi < len(ops) and ref_word_for_op[hi] is not None:
-                return ref_word_for_op[hi]
+        # Prefer the next reference word (insertions act like leading noise
+        # for the upcoming word), using learner_index distance when available.
+        op = ops[op_index]
+        ins_idx = op.learner_index
+
+        lo = op_index
+        while lo >= 0 and ref_word_for_op[lo] is None:
             lo -= 1
+        hi = op_index
+        while hi < len(ops) and ref_word_for_op[hi] is None:
             hi += 1
-        return None
+
+        left_w = ref_word_for_op[lo] if lo >= 0 else None
+        right_w = ref_word_for_op[hi] if hi < len(ops) else None
+
+        if left_w is None:
+            return right_w
+        if right_w is None:
+            return left_w
+
+        # if we know the insertion's learner index, pick by distance
+        if ins_idx is not None:
+            left_learner = ops[lo].learner_index
+            right_learner = ops[hi].learner_index
+            left_dist = abs(ins_idx - left_learner) if left_learner is not None else float("inf")
+            right_dist = abs(ins_idx - right_learner) if right_learner is not None else float("inf")
+            if left_dist < right_dist:
+                return left_w
+            if right_dist < left_dist:
+                return right_w
+        # tie / no learner index: prefer the next word
+        return right_w
 
     word_ops: dict[int, list[AlignmentOp]] = {wi: [] for wi in range(len(ref_per_word))}
     word_learner: dict[int, list[str]] = {wi: [] for wi in range(len(ref_per_word))}

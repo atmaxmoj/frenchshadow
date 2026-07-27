@@ -157,3 +157,39 @@ def test_reference_ipa_strips_punctuation():
     assert "world" in words
     assert "Hello," not in words
     assert "world!" not in words
+
+
+def test_leading_insertions_ignored():
+    """Noise before the first word should not kill the first word's score."""
+    ref = [("the", ["ð", "ə"]), ("cat", ["k", "æ", "t"])]
+    learner = ["ə", "ð", "ə", "k", "æ", "t"]  # leading schwa
+    out = analyze_words(ref, learner)
+    assert out[0].score == 1.0
+    assert out[1].score == 1.0
+
+
+def test_trailing_insertions_ignored():
+    """Noise after the last word should not kill the last word's score."""
+    ref = [("the", ["ð", "ə"]), ("cat", ["k", "æ", "t"])]
+    learner = ["ð", "ə", "k", "æ", "t", "ə"]  # trailing schwa
+    out = analyze_words(ref, learner)
+    assert out[0].score == 1.0
+    assert out[1].score == 1.0
+
+
+def test_insertions_assigned_to_nearest_word():
+    """Mid-sentence filler should be attached to the nearest real word."""
+    ref = [("I", ["aɪ"]), ("like", ["l", "aɪ", "k"])]
+    learner = ["aɪ", "ə", "l", "aɪ", "k"]  # filler between words
+    out = analyze_words(ref, learner)
+    # Either word may get the insertion; neither should be scored 0.
+    assert all(w.score >= 0.5 for w in out)
+
+
+def test_error_penalty_cap():
+    """A word with many spurious errors should not score below 0."""
+    ref = [("the", ["ð", "ə"])]
+    learner = ["ə", "ð", "ə", "ə", "ə", "ə"]  # lots of insertions
+    out = analyze_words(ref, learner)
+    assert out[0].score >= 0.0
+    assert len(out[0].errors) <= 3  # UI caps at 3
