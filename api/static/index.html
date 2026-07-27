@@ -40,28 +40,27 @@
     }
     .sentence {
       font-size: 32px;
-      line-height: 1.7;
+      line-height: 1.9;
       text-align: center;
       margin-bottom: 28px;
       user-select: none;
     }
     .word {
       display: inline-block;
-      padding: 4px 8px;
+      padding: 6px 10px;
       margin: 2px;
-      border-radius: 10px;
-      cursor: pointer;
-      transition: transform 0.15s, background 0.2s, box-shadow 0.2s;
-      border: 1px solid transparent;
+      border-radius: 12px;
+      cursor: default;
+      transition: transform 0.12s, background 0.15s, box-shadow 0.15s, border-color 0.15s;
+      border: 2px solid transparent;
       position: relative;
     }
-    .word:hover { background: rgba(255,255,255,0.06); }
     .word.active {
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       color: #000;
-      transform: scale(1.08);
-      box-shadow: 0 0 18px rgba(138,180,248,0.45);
-      font-weight: 700;
+      transform: scale(1.12);
+      box-shadow: 0 0 24px rgba(138,180,248,0.55);
+      font-weight: 800;
     }
     .word.good { border-color: var(--good); }
     .word.warn { border-color: var(--warn); }
@@ -73,6 +72,7 @@
       justify-content: center;
       align-items: center;
       margin-bottom: 20px;
+      flex-wrap: wrap;
     }
     button {
       border: none;
@@ -88,18 +88,34 @@
     .btn-primary { background: var(--accent); color: #000; }
     .btn-secondary { background: rgba(255,255,255,0.12); color: var(--text); }
     .btn-play { background: var(--good); color: #000; }
+    .btn-danger { background: var(--bad); color: #000; }
 
     .status {
       text-align: center;
       color: var(--muted);
       min-height: 24px;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
     .timer {
       font-variant-numeric: tabular-nums;
       color: var(--accent);
       font-weight: 700;
     }
+    .vu-meter {
+      display: flex;
+      justify-content: center;
+      gap: 4px;
+      height: 32px;
+      align-items: flex-end;
+      margin-bottom: 16px;
+    }
+    .vu-bar {
+      width: 6px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 3px;
+      transition: height 0.05s, background 0.2s;
+    }
+    .vu-bar.hot { background: var(--bad); }
 
     .audio-wrap { display: none; justify-content: center; margin-bottom: 20px; }
     .audio-wrap.visible { display: flex; }
@@ -158,9 +174,12 @@
   <div class="card">
     <div class="sentence" id="sentence"></div>
 
+    <div class="vu-meter" id="vuMeter"></div>
+
     <div class="controls">
       <button id="btnStart" class="btn-primary">开始朗读</button>
       <button id="btnStop" class="btn-secondary" disabled>停止</button>
+      <button id="btnRetry" class="btn-danger hidden">重来</button>
       <button id="btnPlay" class="btn-play hidden">播放并高亮</button>
     </div>
 
