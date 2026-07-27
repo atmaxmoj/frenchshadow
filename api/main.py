@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.analyzer import analyze
+from src.analyzer import analyze, reference_ipa_per_word
 from src.articulatory import attach_tips
 from src.audio import reduce_noise
 from src.models import TARGET_SR, load_audio, load_model, transcribe
@@ -194,6 +194,21 @@ def youtube_transcript(video_id: str, language: str = "fr-fr") -> dict:
     except Exception as exc:
         logger.exception("youtube transcript failed")
         raise HTTPException(status_code=500, detail=f"youtube transcript failed: {exc}") from exc
+
+
+@app.get("/word_ipa")
+def word_ipa(word: str, language: str = "fr-fr") -> dict:
+    """Return the IPA pronunciation for a single *word*."""
+    if not word or not word.strip():
+        raise HTTPException(status_code=400, detail="empty word")
+    try:
+        pairs = reference_ipa_per_word(word.strip(), language=language)
+        if not pairs:
+            return {"word": word, "ipa": ""}
+        return {"word": pairs[0][0], "ipa": "".join(pairs[0][1])}
+    except Exception as exc:
+        logger.exception("word_ipa failed")
+        raise HTTPException(status_code=500, detail=f"word_ipa failed: {exc}") from exc
 
 
 @app.get("/mouth_diagram")
