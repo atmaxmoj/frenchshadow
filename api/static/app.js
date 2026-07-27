@@ -33,8 +33,10 @@ let nextWordIndex = 0;
 let isRecording = false;
 
 const VU_BARS = 24;
-const SILENCE_THRESHOLD = 0.015;
-const SILENCE_DURATION_MS = 1200;
+// Threshold and duration tuned for shadow-reading: ignore keyboard/mouse taps
+// and only stop after a clear 2.5s pause.
+const SILENCE_THRESHOLD = 0.035;
+const SILENCE_DURATION_MS = 2500;
 const MIN_RECORDING_MS = 1500;
 
 function renderSentence() {
