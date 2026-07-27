@@ -341,6 +341,30 @@
       padding: 4px;
     }
 
+    .history-section {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .history-section h4 {
+      font-family: var(--font-display);
+      font-size: 14px;
+      margin: 0 0 10px;
+      color: var(--ink);
+    }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .history-item:last-child { border-bottom: none; }
+    .history-score { font-weight: 700; font-size: 15px; min-width: 32px; }
+    .history-time { color: var(--muted); flex: 1; }
+    .history-item button { padding: 4px 8px; font-size: 12px; }
+
     .recording-dot {
       width: 10px; height: 10px;
       border-radius: 50%;
@@ -404,6 +428,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

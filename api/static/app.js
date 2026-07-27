@@ -193,6 +193,7 @@ function setCurrentSentence(idx) {
   renderSentenceList();
   renderSubtitle(idx);
   renderAnalysis(null);
+  loadAttempts();
   setStatus("按 ▶ 原句 听一遍，或按 🎤 跟读");
   els.btnPlayUser.disabled = true;
   if (state.playerReady && state.player.cueVideoById) {
@@ -383,11 +384,104 @@ async function uploadAndAnalyze(blob) {
     state.analysis = data.analysis || {};
     state.tokenTimes = data.tokens || [];
     renderAnalysis(data);
+    await saveAttempt(blob, data);
+    await loadAttempts();
     setStatus("分析完成。r=重读，c=继续");
     els.btnPlayUser.disabled = false;
   } catch (err) {
     console.error(err);
     setStatus("分析失败：" + err.message);
+  }
+}
+
+async function saveAttempt(blob, data) {
+  const s = state.sentences[state.currentIdx];
+  const form = new FormData();
+  form.append("audio", blob, "recording.webm");
+  form.append("video_id", state.videoId);
+  form.append("sentence_idx", state.currentIdx);
+  form.append("sentence_text", s.text);
+  form.append("language", state.language);
+  form.append("analysis", JSON.stringify(data.analysis || {}));
+  try {
+    await fetch("/attempts", { method: "POST", body: form });
+  } catch (err) {
+    console.warn("save attempt failed", err);
+  }
+}
+
+async function loadAttempts() {
+  if (!state.videoId) return;
+  try {
+    const res = await fetch(`/attempts?video_id=${encodeURIComponent(state.videoId)}&sentence_idx=${state.currentIdx}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderHistory(data.attempts || []);
+  } catch (err) {
+    console.warn("load attempts failed", err);
+  }
+}
+
+function renderHistory(attempts) {
+  const existing = document.getElementById("historySection");
+  if (existing) existing.remove();
+  if (!attempts.length) return;
+  const best = Math.max(...attempts.map((a) => a.overall_score || 0));
+  const list = attempts
+    .map(
+      (a) => `
+      <div class="history-item">
+        <span class="history-score" style="color:var(--${scoreClass(a.overall_score)})">${Math.round((a.overall_score || 0) * 100)}</span>
+        <span class="history-time">${formatTime(a.created_at)}</span>
+        <button class="btn-secondary" onclick="window.playAttemptAudio('${a.id}')">▶</button>
+        <button class="btn-secondary" onclick="window.loadAttemptAnalysis('${a.id}')">分析</button>
+      </div>
+    `
+    )
+    .join("");
+  const section = document.createElement("div");
+  section.id = "historySection";
+  section.className = "history-section";
+  section.innerHTML = `
+    <h4>本句历史（最佳 ${Math.round(best * 100)}）</h4>
+    ${list}
+  `;
+  els.analysisPanel.appendChild(section);
+}
+
+window.playAttemptAudio = async function (attemptId) {
+  try {
+    const res = await fetch(`/attempts/${attemptId}/audio`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    new Audio(URL.createObjectURL(blob)).play();
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+window.loadAttemptAnalysis = async function (attemptId) {
+  try {
+    const res = await fetch(`/attempts?video_id=${encodeURIComponent(state.videoId)}&sentence_idx=${state.currentIdx}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const attempt = (data.attempts || []).find((a) => a.id === attemptId);
+    if (!attempt) return;
+    // Reconstruct a data object compatible with renderAnalysis.
+    const full = { analysis: attempt.analysis };
+    state.analysis = attempt.analysis || {};
+    renderAnalysis(full);
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+function formatTime(iso) {
+  try {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  } catch (e) {
+    return iso;
   }
 }
 

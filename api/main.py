@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from src.liaison import detect_liaisons, reference_text_for_word
 from src.diagrams import diagram as mouth_diagram, has_diagram
 from src.tts import synthesize
 from src.youtube import TranscriptError, extract_video_id, fetch_transcript, fetch_video_info
+from src.storage import get_attempts, get_recording_path, save_attempt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -194,6 +196,84 @@ def youtube_transcript(video_id: str, language: str = "fr-fr") -> dict:
     except Exception as exc:
         logger.exception("youtube transcript failed")
         raise HTTPException(status_code=500, detail=f"youtube transcript failed: {exc}") from exc
+
+
+@app.post("/attempts")
+async def create_attempt(
+    audio: UploadFile = File(...),
+    video_id: str = Form(...),
+    sentence_idx: int = Form(...),
+    sentence_text: str = Form(...),
+    language: str = Form("fr-fr"),
+    analysis: str = Form(...),
+) -> dict:
+    """Persist a practice attempt (audio + analysis) and return its id."""
+    try:
+        analysis_data = json.loads(analysis)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid analysis JSON: {exc}") from exc
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="empty audio")
+
+    try:
+        attempt = save_attempt(
+            video_id=video_id,
+            sentence_idx=sentence_idx,
+            sentence_text=sentence_text,
+            language=language,
+            audio_bytes=audio_bytes,
+            analysis=analysis_data,
+        )
+    except Exception as exc:
+        logger.exception("save_attempt failed")
+        raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
+
+    return {
+        "id": attempt.id,
+        "video_id": attempt.video_id,
+        "sentence_idx": attempt.sentence_idx,
+        "overall_score": attempt.overall_score,
+        "created_at": attempt.created_at,
+    }
+
+
+@app.get("/attempts")
+def list_attempts(video_id: str, sentence_idx: int | None = None) -> dict:
+    """List persisted attempts for a video, optionally filtered by sentence."""
+    if not video_id:
+        raise HTTPException(status_code=400, detail="empty video_id")
+    try:
+        attempts = get_attempts(video_id, sentence_idx=sentence_idx)
+    except Exception as exc:
+        logger.exception("list_attempts failed")
+        raise HTTPException(status_code=500, detail=f"list failed: {exc}") from exc
+
+    return {
+        "video_id": video_id,
+        "sentence_idx": sentence_idx,
+        "attempts": [
+            {
+                "id": a.id,
+                "sentence_idx": a.sentence_idx,
+                "sentence_text": a.sentence_text,
+                "overall_score": a.overall_score,
+                "analysis": a.analysis,
+                "created_at": a.created_at,
+            }
+            for a in attempts
+        ],
+    }
+
+
+@app.get("/attempts/{attempt_id}/audio")
+def attempt_audio(attempt_id: str) -> FileResponse:
+    """Stream the recorded audio for a persisted attempt."""
+    path = get_recording_path(attempt_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="recording not found")
+    return FileResponse(path, media_type="audio/webm", filename=path.name)
 
 
 @app.get("/word_ipa")
