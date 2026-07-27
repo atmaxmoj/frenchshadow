@@ -32,6 +32,7 @@ let recognition = null;
 let nextWordIndex = 0;
 let isRecording = false;
 let liaisonPairs = new Set();
+let referenceAudios = {};
 
 const VU_BARS = 24;
 // Threshold and duration tuned for shadow-reading.  Time-domain RMS is less
@@ -349,7 +350,30 @@ function scoreClass(score) {
   return "bad";
 }
 
+async function preloadReferenceAudios() {
+  try {
+    const q = new URLSearchParams({ sentence: SENTENCE, language: LANGUAGE });
+    const res = await fetch(`/prebake_reference?${q.toString()}`);
+    if (!res.ok) throw new Error("prebake failed");
+    const data = await res.json();
+    for (const [word, b64] of Object.entries(data.audios || {})) {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: "audio/wav" });
+      referenceAudios[word] = URL.createObjectURL(blob);
+    }
+    setStatus("标准发音已准备好");
+  } catch (err) {
+    console.warn("preload reference audio failed", err);
+  }
+}
+
 async function playReference(word) {
+  const cached = referenceAudios[word];
+  if (cached) {
+    const audio = new Audio(cached);
+    audio.play().catch((err) => console.error(err));
+    return;
+  }
   try {
     const q = new URLSearchParams({ text: word, language: LANGUAGE, sentence: SENTENCE });
     const res = await fetch(`/reference_audio?${q.toString()}`);
@@ -506,3 +530,4 @@ els.btnPlay.addEventListener("click", playWithHighlight);
 renderSentence();
 loadLiaisons();
 createVuMeter();
+preloadReferenceAudios();

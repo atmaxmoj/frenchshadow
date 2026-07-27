@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import shutil
 import subprocess
@@ -22,6 +24,7 @@ from src.models import TARGET_SR, load_audio, load_model, transcribe
 from src.liaison import detect_liaisons, reference_text_for_word
 from src.diagrams import diagram as mouth_diagram, has_diagram
 from src.tts import synthesize
+from src.youtube import TranscriptError, extract_video_id, fetch_transcript, fetch_video_info
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -165,6 +168,34 @@ def liaisons(sentence: str, language: str = "fr-fr") -> dict:
     return {"sentence": sentence, "liaisons": detect_liaisons(sentence, language)}
 
 
+@app.get("/youtube/info")
+def youtube_info(url: str, language: str = "fr-fr") -> dict:
+    """Return metadata and available transcript languages for a YouTube URL."""
+    if not url or not url.strip():
+        raise HTTPException(status_code=400, detail="empty URL")
+    try:
+        return fetch_video_info(url.strip(), preferred_language=language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("youtube info failed")
+        raise HTTPException(status_code=500, detail=f"youtube info failed: {exc}") from exc
+
+
+@app.get("/youtube/transcript")
+def youtube_transcript(video_id: str, language: str = "fr-fr") -> dict:
+    """Return sentence-level transcript with word timings for a YouTube video."""
+    if not video_id or not video_id.strip():
+        raise HTTPException(status_code=400, detail="empty video_id")
+    try:
+        return fetch_transcript(video_id.strip(), language=language)
+    except TranscriptError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("youtube transcript failed")
+        raise HTTPException(status_code=500, detail=f"youtube transcript failed: {exc}") from exc
+
+
 @app.get("/mouth_diagram")
 def mouth_diagram_endpoint(phone: str) -> Response:
     """Return an SVG articulatory diagram for an IPA phone."""
@@ -183,6 +214,41 @@ def mouth_diagram_endpoint(phone: str) -> Response:
         "Expires": "0",
     }
     return Response(content=svg, media_type="image/svg+xml", headers=headers)
+
+
+def _synthesize_to_b64(text: str, language: str) -> str | None:
+    """Synthesize *text* and return base64-encoded WAV bytes, or None on failure."""
+    try:
+        data = synthesize(text, language=language)
+        return base64.b64encode(data).decode("ascii")
+    except Exception as exc:
+        logger.warning("pre-bake TTS failed for %r: %s", text, exc)
+        return None
+
+
+@app.get("/prebake_reference")
+async def prebake_reference(sentence: str, language: str = "fr-fr") -> dict:
+    """Pre-synthesize reference audio for every word in *sentence*.
+
+    Returns a JSON object `{audios: {word: base64wav, ...}}`.  The frontend can
+    turn each base64 blob into an object URL and play it instantly when the user
+    clicks the reference-speaker button.
+    """
+    if not sentence or not sentence.strip():
+        raise HTTPException(status_code=400, detail="empty sentence")
+
+    words = sentence.split()
+    if not words:
+        raise HTTPException(status_code=400, detail="empty sentence")
+
+    async def _bake(word: str) -> tuple[str, str | None]:
+        tts_text = reference_text_for_word(sentence, word, language)
+        b64 = await asyncio.to_thread(_synthesize_to_b64, tts_text, language)
+        return word, b64
+
+    baked = await asyncio.gather(*[_bake(w) for w in words])
+    audios = {word: b64 for word, b64 in baked if b64}
+    return {"sentence": sentence, "language": language, "audios": audios}
 
 
 @app.get("/reference_audio")
