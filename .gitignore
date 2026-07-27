@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+models/
+cache/
+.DS_Store
+*.log

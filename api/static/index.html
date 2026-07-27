@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shadow Reader · 发音跟读</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #181b21;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #8ab4f8;
+      --accent-2: #c58af9;
+      --good: #81c995;
+      --warn: #f9ab00;
+      --bad: #f28b82;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+    }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .subtitle { color: var(--muted); margin-bottom: 32px; }
+    .card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--card);
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+    }
+    .sentence {
+      font-size: 32px;
+      line-height: 1.7;
+      text-align: center;
+      margin-bottom: 28px;
+      user-select: none;
+    }
+    .word {
+      display: inline-block;
+      padding: 4px 8px;
+      margin: 2px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.2s, box-shadow 0.2s;
+      border: 1px solid transparent;
+      position: relative;
+    }
+    .word:hover { background: rgba(255,255,255,0.06); }
+    .word.active {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: #000;
+      transform: scale(1.08);
+      box-shadow: 0 0 18px rgba(138,180,248,0.45);
+      font-weight: 700;
+    }
+    .word.good { border-color: var(--good); }
+    .word.warn { border-color: var(--warn); }
+    .word.bad { border-color: var(--bad); }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 14px 28px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: filter 0.15s, transform 0.1s;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button:active:not(:disabled) { transform: scale(0.97); }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-secondary { background: rgba(255,255,255,0.12); color: var(--text); }
+    .btn-play { background: var(--good); color: #000; }
+
+    .status {
+      text-align: center;
+      color: var(--muted);
+      min-height: 24px;
+      margin-bottom: 16px;
+    }
+    .timer {
+      font-variant-numeric: tabular-nums;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .audio-wrap { display: none; justify-content: center; margin-bottom: 20px; }
+    .audio-wrap.visible { display: flex; }
+
+    .results { margin-top: 20px; }
+    .result-item {
+      background: rgba(255,255,255,0.04);
+      border-radius: 14px;
+      padding: 16px 18px;
+      margin-bottom: 12px;
+    }
+    .result-header {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .result-word { font-size: 20px; font-weight: 700; }
+    .result-ipa { color: var(--muted); font-family: monospace; }
+    .result-score { margin-left: auto; font-weight: 700; }
+    .tip-box {
+      margin-top: 10px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(138,180,248,0.1);
+      border-left: 3px solid var(--accent);
+    }
+    .tip-box h4 { margin: 0 0 8px; font-size: 14px; }
+    .tip-box p { margin: 4px 0; font-size: 14px; color: var(--text); }
+    .tip-box .label { color: var(--muted); }
+    .overall {
+      text-align: center;
+      font-size: 48px;
+      font-weight: 800;
+      margin: 8px 0 24px;
+    }
+    .hidden { display: none; }
+    .recording-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--bad);
+      display: inline-block;
+      margin-right: 8px;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Shadow Reader</h1>
+  <div class="subtitle">读一句，停一句，AI 逐词点评发音</div>
+
+  <div class="card">
+    <div class="sentence" id="sentence"></div>
+
+    <div class="controls">
+      <button id="btnStart" class="btn-primary">开始朗读</button>
+      <button id="btnStop" class="btn-secondary" disabled>停止</button>
+      <button id="btnPlay" class="btn-play hidden">播放并高亮</button>
+    </div>
+
+    <div class="status" id="status">点击「开始朗读」，然后读出上面的句子</div>
+    <div class="status timer" id="timer"></div>
+
+    <div class="audio-wrap" id="audioWrap">
+      <audio id="audioPlayer" controls></audio>
+    </div>
+
+    <div class="results hidden" id="results">
+      <div class="overall" id="overallScore"></div>
+      <div id="resultList"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
