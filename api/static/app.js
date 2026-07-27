@@ -314,6 +314,40 @@ function scoreClass(score) {
   return "bad";
 }
 
+async function playReference(word) {
+  try {
+    const res = await fetch(`/reference_audio?text=${encodeURIComponent(word)}&language=${encodeURIComponent(LANGUAGE)}`);
+    if (!res.ok) throw new Error("reference audio failed");
+    const blob = await res.blob();
+    const audio = new Audio(URL.createObjectURL(blob));
+    audio.play();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function playUserSlice(startTime, endTime) {
+  if (!recordedBlob || startTime >= endTime) return;
+  try {
+    const arrayBuffer = await recordedBlob.arrayBuffer();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    const duration = endTime - startTime;
+    const offline = new OfflineAudioContext(decoded.numberOfChannels, Math.ceil(decoded.sampleRate * duration), decoded.sampleRate);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0, startTime, duration);
+    const rendered = await offline.startRendering();
+    const dest = audioCtx.createBufferSource();
+    dest.buffer = rendered;
+    dest.connect(audioCtx.destination);
+    dest.start();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 function renderAnalysis(data) {
   const analysis = data.analysis || {};
   const words = analysis.words || [];
@@ -336,6 +370,9 @@ function renderAnalysis(data) {
     const item = document.createElement("div");
     const isPerfect = w.score >= 0.99 && w.errors.length === 0;
     item.className = "result-item";
+    const safeWord = w.word.replace(/"/g, "&quot;");
+    const start = typeof w.start_time === "number" ? w.start_time : 0;
+    const end = typeof w.end_time === "number" ? w.end_time : 0;
     let errs = "";
     if (!isPerfect) {
       w.errors.forEach((e) => {
@@ -357,6 +394,10 @@ function renderAnalysis(data) {
         <span class="result-word">${w.word}</span>
         <span class="result-ipa">/${w.target_ipa}/</span>
         <span class="result-score" style="color:${scoreClass(w.score) === "good" ? "var(--good)" : scoreClass(w.score) === "warn" ? "var(--warn)" : "var(--bad)"}">${Math.round(w.score * 100)}</span>
+        <span class="word-play-btns">
+          <button class="btn-ref" onclick="window.playReference('${safeWord}')" title="标准发音">🔊</button>
+          <button class="btn-user" onclick="window.playUserSlice(${start}, ${end})" title="我的录音">🎤</button>
+        </span>
       </div>
       ${isPerfect ? '<p style="color:var(--good);margin:4px 0 0;">✓ 发音良好</p>' : errs}
     `;
@@ -366,6 +407,10 @@ function renderAnalysis(data) {
   els.results.classList.remove("hidden");
   els.btnPlay.classList.remove("hidden");
 }
+
+// expose for inline onclick handlers
+window.playReference = playReference;
+window.playUserSlice = playUserSlice;
 
 function playWithHighlight() {
   if (!analysisData || !analysisData.analysis) return;

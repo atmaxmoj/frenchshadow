@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -135,3 +137,26 @@ async def transcribe_endpoint(
             response["analysis_error"] = str(e)
 
     return response
+
+
+@app.get("/reference_audio")
+def reference_audio(text: str, language: str = "en-us") -> Response:
+    """Synthesize *text* with espeak-ng and return a WAV file."""
+    if not shutil.which("espeak-ng"):
+        raise HTTPException(status_code=503, detail="espeak-ng not installed")
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="empty text")
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        try:
+            subprocess.run(
+                ["espeak-ng", "-v", language, text, "-w", tmp.name],
+                check=True,
+                capture_output=True,
+            )
+            with open(tmp.name, "rb") as f:
+                data = f.read()
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+
+    return Response(content=data, media_type="audio/wav")
