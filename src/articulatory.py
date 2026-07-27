@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from src.practice_words import practice_phrase
+
 try:
     from panphon import FeatureTable
 
@@ -219,15 +221,16 @@ _FEATURE_HINTS = {
 }
 
 
-def _generic_tip(expected: str, actual: str) -> ArticulatoryTip:
+def _generic_tip(expected: str, actual: str, language: str = "en-us") -> ArticulatoryTip:
     """Build a generic tip by comparing panphon feature vectors."""
+    practice = practice_phrase(expected, language, default=f"{expected} vs {actual}")
     if _ft is None:
         return ArticulatoryTip(
             description=f"目标音 {expected} 和你说出的 {actual} 不一致。",
             tongue="尝试模仿目标音的舌位。",
             lips="注意嘴唇形状。",
             jaw="注意下巴开合。",
-            practice="listen and repeat",
+            practice=practice,
         )
 
     exp_seg = _ft.fts(expected)
@@ -238,7 +241,7 @@ def _generic_tip(expected: str, actual: str) -> ArticulatoryTip:
             tongue="尝试模仿目标音的舌位。",
             lips="注意嘴唇形状。",
             jaw="注意下巴开合。",
-            practice="listen and repeat",
+            practice=practice,
         )
 
     def feat(seg, name: str):
@@ -263,11 +266,16 @@ def _generic_tip(expected: str, actual: str) -> ArticulatoryTip:
         tongue=detail,
         lips="观察 native speaker 的口型并模仿。",
         jaw="配合元音开合调整下巴。",
-        practice=f"{expected} vs {actual}",
+        practice=practice,
     )
 
 
-def get_tip(expected: str | None, actual: str | None, label: str) -> dict:
+def get_tip(
+    expected: str | None,
+    actual: str | None,
+    label: str,
+    language: str = "en-us",
+) -> dict:
     """Return a concrete articulatory tip as a plain dict.
 
     Parameters
@@ -278,27 +286,38 @@ def get_tip(expected: str | None, actual: str | None, label: str) -> dict:
         Learner IPA phone (None for deletions).
     label : str
         Pre-computed error label from the analyzer.
+    language : str
+        Used to pick language-appropriate practice words.
     """
-    tip: ArticulatoryTip
     if label in TIPS:
-        tip = TIPS[label]
+        base = TIPS[label]
     elif expected and actual:
-        tip = _generic_tip(expected, actual)
+        base = _generic_tip(expected, actual, language)
     elif label.startswith("extra") or actual:
-        tip = TIPS["extra sound"]
+        base = TIPS["extra sound"]
     else:
-        tip = TIPS["missing sound"]
+        base = TIPS["missing sound"]
+
+    # Replace generic practice words with a phone-specific list when possible.
+    focus_phone = actual if (label.startswith("extra") or actual) else expected
+    practice = base.practice
+    if focus_phone:
+        suggested = practice_phrase(focus_phone, language)
+        if suggested:
+            practice = suggested
 
     return {
-        "description": tip.description,
-        "tongue": tip.tongue,
-        "lips": tip.lips,
-        "jaw": tip.jaw,
-        "practice": tip.practice,
+        "description": base.description,
+        "tongue": base.tongue,
+        "lips": base.lips,
+        "jaw": base.jaw,
+        "practice": practice,
+        "diagram_expected": f"/mouth_diagram?phone={expected}" if expected else None,
+        "diagram_actual": f"/mouth_diagram?phone={actual}" if actual else None,
     }
 
 
-def attach_tips(analysis: dict) -> dict:
+def attach_tips(analysis: dict, language: str = "en-us") -> dict:
     """Mutate an analysis dict in place, adding tips to every error."""
     for word in analysis.get("words", []):
         for err in word.get("errors", []):
@@ -306,5 +325,6 @@ def attach_tips(analysis: dict) -> dict:
                 err.get("expected"),
                 err.get("actual"),
                 err.get("label", ""),
+                language=language,
             )
     return analysis

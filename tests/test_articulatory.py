@@ -31,6 +31,18 @@ def test_deletion_tip():
     assert "漏掉" in tip["description"]
 
 
+def test_tip_includes_diagram_urls():
+    tip = get_tip("θ", "s", "voiceless th → s")
+    assert tip["diagram_expected"] == "/mouth_diagram?phone=θ"
+    assert tip["diagram_actual"] == "/mouth_diagram?phone=s"
+
+
+def test_insertion_tip_has_only_actual_diagram():
+    tip = get_tip(None, "ə", "extra sound (ə)")
+    assert tip["diagram_expected"] is None
+    assert tip["diagram_actual"] == "/mouth_diagram?phone=ə"
+
+
 def test_all_custom_tips_have_required_fields():
     for label, tip in TIPS.items():
         assert tip.description

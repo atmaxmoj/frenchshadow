@@ -135,4 +135,17 @@ def transcribe(audio: np.ndarray, processor: Any | None = None, model: Any | Non
     if len(token_times) != len(tokens):
         token_times = [i * duration_s / max(len(tokens), 1) for i in range(len(tokens))]
 
-    return {"raw": text, "tokens": tokens, "token_times": token_times}
+    # Normalize tokens (strip stress/syllable markers) and keep only those with
+    # a non-empty normalized form. The times stay aligned with the surviving
+    # tokens so that analyzer indices map directly to seconds.
+    normalized_pairs: list[tuple[str, float]] = []
+    for tok, t in zip(tokens, token_times):
+        norm = tok.rstrip(".0123456789")
+        if norm:
+            normalized_pairs.append((norm, t))
+
+    return {
+        "raw": text,
+        "tokens": [p[0] for p in normalized_pairs],
+        "token_times": [p[1] for p in normalized_pairs],
+    }

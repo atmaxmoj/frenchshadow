@@ -1,4 +1,4 @@
-"""Audio utilities: file loading and microphone recording."""
+"""Audio utilities: file loading, microphone recording, and preprocessing."""
 
 from __future__ import annotations
 
@@ -8,9 +8,33 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+try:
+    import noisereduce as nr
+
+    _HAS_NR = True
+except Exception:  # pragma: no cover
+    _HAS_NR = False
+
 logger = logging.getLogger(__name__)
 
 TARGET_SR = 16000
+
+
+def reduce_noise(audio: np.ndarray, samplerate: int = TARGET_SR) -> np.ndarray:
+    """Apply stationary noise reduction to a mono float32 array.
+
+    Falls back to the original audio if noisereduce is unavailable or fails.
+    """
+    if not _HAS_NR:
+        return audio
+    try:
+        # Use a short leading window to estimate the noise profile when the
+        # recording starts before the user speaks.
+        cleaned = nr.reduce_noise(y=audio, sr=samplerate, stationary=True, prop_decrease=1.0)
+        return cleaned.astype(np.float32)
+    except Exception:
+        logger.exception("noise reduction failed, returning original audio")
+        return audio
 
 
 def record_audio(duration: float = 3.0, samplerate: int = TARGET_SR) -> np.ndarray:

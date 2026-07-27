@@ -31,13 +31,15 @@ let vadFrameId = null;
 let recognition = null;
 let nextWordIndex = 0;
 let isRecording = false;
+let liaisonPairs = new Set();
 
 const VU_BARS = 24;
-// Threshold and duration tuned for shadow-reading: ignore keyboard/mouse taps
-// and only stop after a clear 2.5s pause.
-const SILENCE_THRESHOLD = 0.035;
-const SILENCE_DURATION_MS = 2500;
-const MIN_RECORDING_MS = 1500;
+// Threshold and duration tuned for shadow-reading.  Time-domain RMS is less
+// jumpy than frequency-domain energy, and a longer silence window avoids
+// stopping in the middle of a short phrase like "le petit".
+const SILENCE_THRESHOLD = 0.018;
+const SILENCE_DURATION_MS = 3200;
+const MIN_RECORDING_MS = 1200;
 
 function renderSentence() {
   els.sentence.innerHTML = "";
@@ -47,8 +49,30 @@ function renderSentence() {
     span.dataset.index = idx;
     span.textContent = word;
     els.sentence.appendChild(span);
+    // Mark liaison: if this word initiates a liaison with the next word,
+    // add a small connector instead of a plain space.
+    const nextWord = SENTENCE_WORDS[idx + 1];
+    if (nextWord && liaisonPairs.has(`${word.toLowerCase()}|${nextWord.toLowerCase()}`)) {
+      const connector = document.createElement("span");
+      connector.className = "liaison-connector";
+      connector.textContent = "‿";
+      els.sentence.appendChild(connector);
+    }
     els.sentence.appendChild(document.createTextNode(" "));
   });
+}
+
+async function loadLiaisons() {
+  if (!LANGUAGE.startsWith("fr")) return;
+  try {
+    const res = await fetch(`/liaisons?sentence=${encodeURIComponent(SENTENCE)}&language=${encodeURIComponent(LANGUAGE)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    liaisonPairs = new Set((data.liaisons || []).map(([a, b]) => `${a.toLowerCase()}|${b.toLowerCase()}`));
+    renderSentence();
+  } catch (err) {
+    console.warn("liaison load failed", err);
+  }
 }
 
 function createVuMeter() {
@@ -142,22 +166,25 @@ function setupVAD(stream) {
   analyser.fftSize = 256;
   source.connect(analyser);
 
-  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+  const dataArray = new Uint8Array(analyser.fftSize);
   let silenceStart = null;
 
   function tick() {
     if (!isRecording) return;
-    analyser.getByteFrequencyData(dataArray);
+    analyser.getByteTimeDomainData(dataArray);
 
-    // RMS-ish volume from frequency data
+    // True RMS over the time-domain waveform (values centred at 128).
     let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-    const avg = sum / dataArray.length / 255;
+    for (let i = 0; i < dataArray.length; i++) {
+      const v = (dataArray[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / dataArray.length);
 
-    updateVuMeter(avg);
+    updateVuMeter(rms);
 
     const now = Date.now();
-    if (avg < SILENCE_THRESHOLD) {
+    if (rms < SILENCE_THRESHOLD) {
       if (silenceStart === null) silenceStart = now;
       else if (now - silenceStart > SILENCE_DURATION_MS && now - recordingStartTime > MIN_RECORDING_MS) {
         autoStop();
@@ -193,7 +220,13 @@ function resetVuMeter() {
 
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: true,
+        autoGainControl: false,
+      },
+    });
     mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
     recordedChunks = [];
     nextWordIndex = 0;
@@ -318,7 +351,8 @@ function scoreClass(score) {
 
 async function playReference(word) {
   try {
-    const res = await fetch(`/reference_audio?text=${encodeURIComponent(word)}&language=${encodeURIComponent(LANGUAGE)}`);
+    const q = new URLSearchParams({ text: word, language: LANGUAGE, sentence: SENTENCE });
+    const res = await fetch(`/reference_audio?${q.toString()}`);
     if (!res.ok) throw new Error("reference audio failed");
     const blob = await res.blob();
     const audio = new Audio(URL.createObjectURL(blob));
@@ -350,6 +384,17 @@ async function playUserSlice(startTime, endTime) {
   }
 }
 
+function diagramImg(url, phone, fallbackText) {
+  if (url) {
+    return `<img src="${url}&_=${Date.now()}" alt="/${phone}/" class="mouth-diagram" onerror="this.style.display='none'" />`;
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 210" width="300" height="210">
+    <rect x="30" y="25" width="240" height="160" rx="14" fill="none" stroke="#5f6368" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="150" y="112" text-anchor="middle" fill="#9aa0a6" font-size="20" font-family="sans-serif">${fallbackText}</text>
+  </svg>`;
+  return `<img src="data:image/svg+xml,${encodeURIComponent(svg)}" alt="${fallbackText}" class="mouth-diagram" />`;
+}
+
 function renderAnalysis(data) {
   const analysis = data.analysis || {};
   const words = analysis.words || [];
@@ -379,9 +424,21 @@ function renderAnalysis(data) {
     if (!isPerfect) {
       w.errors.forEach((e) => {
         const tips = e.tips || {};
+        const expectedImg = diagramImg(tips.diagram_expected, e.expected || "-", "无图示");
+        const actualImg = diagramImg(tips.diagram_actual, e.actual || "-", e.actual ? "无图示" : "未发音");
         errs += `
           <div class="tip-box">
             <h4>${e.label} <span style="color:var(--muted);font-weight:400;">(${e.expected || "-"} → ${e.actual || "-"})</span></h4>
+            <div class="mouth-diagrams">
+              <div class="mouth-diagram-wrap">
+                <span class="mouth-diagram-label correct">正确 /${e.expected || "-"}/</span>
+                ${expectedImg}
+              </div>
+              <div class="mouth-diagram-wrap">
+                <span class="mouth-diagram-label user">你的 /${e.actual || "-"}/</span>
+                ${actualImg}
+              </div>
+            </div>
             <p><span class="label">问题：</span>${tips.description || ""}</p>
             <p><span class="label">舌头：</span>${tips.tongue || ""}</p>
             <p><span class="label">嘴唇：</span>${tips.lips || ""}</p>
@@ -447,4 +504,5 @@ els.btnRetry.addEventListener("click", resetAll);
 els.btnPlay.addEventListener("click", playWithHighlight);
 
 renderSentence();
+loadLiaisons();
 createVuMeter();

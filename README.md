@@ -6,7 +6,9 @@
 
 - macOS (已适配 M1/M2/M3) 或 Linux
 - Python 3.11+
-- espeak-ng (`brew install espeak-ng` on macOS)
+- espeak-ng (`brew install espeak-ng` on macOS) —— 用于 wav2vec2 音素化后端
+- edge-tts (`pip install edge-tts`) —— 用于参考音频；离线时自动回退到 macOS `say`
+- ffmpeg —— 用于音频格式转换
 
 ## 安装
 
@@ -65,6 +67,7 @@ shadow-reader/
 - 未使用无 license 的 `slplab` 模型；错误定位依赖参考文本与学习者 IPA 的对齐。
 - 针对中文母语者常见英语错误做了专门分类（th/s、v/w、r/l 等）。
 - 发音建议来自 `panphon` 特征对比 + 人工整理的中国学习者常见错误 tip 库。
+- 嘴形图优先使用 Richard Wright & Dan McCloy 的 [phonetics-teaching-assets](https://github.com/drammock/phonetics-teaching-assets)（CC0），缺失的音用程序生成的示意图兜底。
 
 ## 后续方向
 
