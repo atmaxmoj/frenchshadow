@@ -53,6 +53,7 @@ let analyser = null;
 let silenceTimer = null;
 let vadFrameId = null;
 let isRecording = false;
+let sourceStopTimer = null;
 
 const VU_BARS = 24;
 const SILENCE_THRESHOLD = 0.018;
@@ -383,14 +384,27 @@ function playSourceSentence(idx) {
   setStatus("播放原句…");
   state.player.seekTo(s.start, true);
   state.player.playVideo();
+
+  const durationMs = Math.max((s.end - s.start) * 1000, 200);
+
+  // Poll as a safety net in case the timeout drifts.
   state.sourcePollId = setInterval(() => {
     const t = state.player.getCurrentTime();
-    if (t >= s.end - 0.05) {
+    if (t >= s.end - 0.08 || t < s.start - 0.5) {
       state.player.pauseVideo();
       stopSourcePoll();
       setTimeout(autoStartRecording, 400);
     }
-  }, 80);
+  }, 60);
+
+  // Primary stop: pause when the sentence should have finished.
+  sourceStopTimer = setTimeout(() => {
+    if (state.isPlayingSource) {
+      state.player.pauseVideo();
+      stopSourcePoll();
+      setTimeout(autoStartRecording, 400);
+    }
+  }, durationMs + 250);
 }
 
 function playSourceWord(wordObj) {
@@ -401,14 +415,15 @@ function playSourceWord(wordObj) {
     return;
   }
   stopSourcePoll();
+  state.isPlayingSource = true;
   state.player.seekTo(wordObj.start, true);
   state.player.playVideo();
-  state.sourcePollId = setInterval(() => {
-    if (state.player.getCurrentTime() >= wordObj.end - 0.03) {
-      state.player.pauseVideo();
-      stopSourcePoll();
-    }
-  }, 60);
+
+  const durationMs = Math.max((wordObj.end - wordObj.start) * 1000, 150);
+  sourceStopTimer = setTimeout(() => {
+    state.player.pauseVideo();
+    stopSourcePoll();
+  }, durationMs + 120);
 }
 
 function stopSourcePoll() {
@@ -416,6 +431,10 @@ function stopSourcePoll() {
   if (state.sourcePollId) {
     clearInterval(state.sourcePollId);
     state.sourcePollId = null;
+  }
+  if (sourceStopTimer) {
+    clearTimeout(sourceStopTimer);
+    sourceStopTimer = null;
   }
 }
 
