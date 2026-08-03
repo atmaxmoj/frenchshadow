@@ -113,6 +113,7 @@ def transcribe(audio: np.ndarray, processor: Any | None = None, model: Any | Non
     input_values = inputs.input_values.to(model.device)
     with torch.no_grad():
         logits = model(input_values).logits
+    logp = torch.log_softmax(logits, dim=-1)  # (1, T, V) — for GOP forced-align
     pred_ids = torch.argmax(logits, dim=-1)
     text = processor.batch_decode(pred_ids)[0]
     tokens = text.split()
@@ -148,4 +149,6 @@ def transcribe(audio: np.ndarray, processor: Any | None = None, model: Any | Non
         "raw": text,
         "tokens": [p[0] for p in normalized_pairs],
         "token_times": [p[1] for p in normalized_pairs],
+        "logp": logp.cpu(),
+        "blank_id": blank_id,
     }

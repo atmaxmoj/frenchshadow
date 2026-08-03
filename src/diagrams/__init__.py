@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from .config import load_consonants, load_vowels
+from .dynartmo import has_sagittal, render_sagittal
 from .renderer import render_consonant, render_vowel
 
 # Phones that are commonly written as digraphs or ASCII variants but should
@@ -43,6 +44,8 @@ def _canonical_phone(phone: str) -> str:
 
 def has_diagram(phone: str) -> bool:
     """Return True if *phone* can be illustrated."""
+    if has_sagittal(phone):
+        return True
     canonical = _canonical_phone(phone)
     return canonical in _VOWELS or canonical in _CONSONANTS
 
@@ -50,9 +53,13 @@ def has_diagram(phone: str) -> bool:
 def diagram(phone: str) -> str:
     """Return an SVG string illustrating the articulation of *phone*.
 
-    Vowels get a mouth-profile schematic; consonants get a feature-based
-    sagittal schematic.  Unsupported phones fall back to a minimal placeholder.
+    Primary path is the parametric DYNARTmo midsagittal renderer (every French
+    phoneme); the legacy schematic renderer and a placeholder remain as fallbacks.
     """
+    sagittal = render_sagittal(phone)
+    if sagittal is not None:
+        return sagittal
+
     canonical = _canonical_phone(phone)
 
     vowel_cfg = _VOWELS.get(canonical)

@@ -15,12 +15,15 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from src.analyzer import analyze, reference_ipa_per_word
 from src.articulatory import attach_tips
-from src.audio import reduce_noise
+from src.gop import gop_scores
+from src.intelligibility import score as intelligibility_score
+from src.grapheme import mark_graphemes
+from src.phoneme_audio import phoneme_wav
 from src.models import TARGET_SR, load_audio, load_model, transcribe
 from src.liaison import detect_liaisons, reference_text_for_word
 from src.diagrams import diagram as mouth_diagram, has_diagram
@@ -43,9 +46,6 @@ processor: Any | None = None
 model: Any | None = None
 model_device: str = "cpu"
 
-STATIC_DIR = Path(__file__).with_suffix("").parent / "static"
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global processor, model, model_device
@@ -61,14 +61,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
-
 
 @app.get("/health")
 def health() -> dict:
@@ -130,9 +122,10 @@ async def transcribe_endpoint(
     if not raw:
         raise HTTPException(status_code=400, detail="empty audio")
 
+    # No extra noise reduction: the browser mic already applies noiseSuppression,
+    # and a second spectral-gating pass drops phones the acoustic model would catch.
     try:
-        wav = load_audio(raw)
-        wav = reduce_noise(wav)
+        wav = await asyncio.to_thread(load_audio, raw)
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or b"").decode("utf-8", errors="replace")[:300]
         raise HTTPException(status_code=400, detail=f"ffmpeg decode failed: {stderr}")
@@ -144,7 +137,8 @@ async def transcribe_endpoint(
 
     duration_s = len(wav) / TARGET_SR
     try:
-        result = transcribe(wav, processor=processor, model=model)
+        # CPU-bound inference off the event loop.
+        result = await asyncio.to_thread(transcribe, wav, processor, model)
     except Exception as e:
         logger.exception("inference failed")
         raise HTTPException(status_code=500, detail=f"inference failed: {e}")
@@ -156,11 +150,30 @@ async def transcribe_endpoint(
     }
 
     if target_text:
+        def _analyze():
+            # GOP: force-align the canonical phones to the audio posteriors and
+            # score each by acoustic confidence (partial credit, accent-tolerant).
+            phones = [p for _, ps in reference_ipa_per_word(target_text, language=language) for p in ps]
+            gop = gop_scores(result["logp"], phones, processor, result["blank_id"])
+            a = analyze(target_text, result["tokens"], language=language, gop=gop)
+            attach_tips(a, language=language)
+            _attach_word_times(a, duration_s, result["token_times"])
+            # 达意: context-aware intelligibility via Whisper (what a listener hears).
+            # Optional — silently skipped if the Whisper model isn't present.
+            try:
+                intel = intelligibility_score(wav, target_text, language)
+                if intel:
+                    a["intelligibility"] = intel["overall"]
+                    a["heard"] = intel["heard"]
+                    for i, w in enumerate(a["words"]):
+                        if i < len(intel["per_word"]):
+                            w["intelligibility"] = intel["per_word"][i]
+            except Exception:
+                logger.exception("intelligibility failed")
+            return a
+
         try:
-            analysis = analyze(target_text, result["tokens"], language=language)
-            attach_tips(analysis, language=language)
-            _attach_word_times(analysis, duration_s, result["token_times"])
-            response["analysis"] = analysis
+            response["analysis"] = await asyncio.to_thread(_analyze)
         except Exception as e:
             logger.exception("analysis failed")
             response["analysis_error"] = str(e)
@@ -451,4 +464,35 @@ def reference_audio(
         logger.exception("TTS synthesis failed")
         raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {exc}") from exc
 
+    return Response(content=data, media_type="audio/wav")
+
+
+# --- Grapheme highlighting + isolated/syllable phoneme audio -----------------
+
+class GraphemePair(BaseModel):
+    word: str
+    phone: str
+
+
+class GraphemeRequest(BaseModel):
+    pairs: list[GraphemePair]
+    language: str = "fr-fr"
+
+
+@app.post("/grapheme")
+async def grapheme(req: GraphemeRequest) -> dict:
+    """For each (word, phone), return the word with that sound's letters marked."""
+    pairs = [(p.word, p.phone) for p in req.pairs]
+    marks = await asyncio.to_thread(mark_graphemes, pairs, req.language)
+    return {"marks": marks}
+
+
+@app.get("/phoneme_audio")
+def phoneme_audio(ipa: str, language: str = "fr-fr") -> Response:
+    """Play an IPA phone, or a space-separated syllable (e.g. 'm ɑ̃'), via espeak."""
+    if not ipa or not ipa.strip():
+        raise HTTPException(status_code=400, detail="empty ipa")
+    data = phoneme_wav(ipa.strip(), language)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no audio for phone")
     return Response(content=data, media_type="audio/wav")

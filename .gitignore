@@ -6,3 +6,16 @@ audio_cache/
 recordings/
 data/
 models/
+
+# frontend
+web/node_modules/
+web/.next/
+web/out/
+
+# secrets & caches
+.secrets/
+grapheme_cache/
+phoneme_cache/
+*.log
+.DS_Store
+*.tsbuildinfo

@@ -18,7 +18,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from dataclasses import asdict, dataclass
+import functools
+from dataclasses import asdict, dataclass, field
 from typing import Sequence
 
 # ---------------------------------------------------------------------------
@@ -229,6 +230,7 @@ class WordError:
     label: str
     l1_pattern: bool
     confidence: str  # "high" | "medium" | "low"
+    ref_index: int = 0  # index into the word's target_phones (for highlighting)
     tips: dict | None = None
 
 
@@ -239,6 +241,8 @@ class WordResult:
     learner_ipa: str
     errors: list[WordError]
     score: float
+    target_phones: list[str] = field(default_factory=list)
+    coverage: float = 0.0  # reading completeness for this word (produced or not)
     learner_start: int = 0
     learner_end: int = 0
 
@@ -247,11 +251,45 @@ def _label_for_sub(ref: str, learner: str) -> str:
     return L1_PATTERN_LABELS.get((ref, learner), f"sound mismatch ({ref} → {learner})")
 
 
+# GOP-based scoring (when acoustic posteriors are available).
+GOP_OK = 0.5        # model this confident a phone was said → suppress the error
+COVERAGE_OK = 0.25  # a phone with >= this GOP counts as "produced" (read)
+# Fallback penalties (no GOP): substitution uses articulatory distance.
+DEL_PENALTY = 0.6
+INS_PENALTY = 0.4
+SUB_SCALE = 2.2
+
+
+@functools.lru_cache(maxsize=1)
+def _feature_table():
+    import panphon
+    return panphon.FeatureTable()
+
+
+@functools.lru_cache(maxsize=4096)
+def _sub_penalty(ref: str, learner: str) -> float:
+    """Substitution penalty = panphon articulatory-feature distance × scale.
+
+    Close (accent-like) substitutions cost little; far ones cost more.
+    """
+    try:
+        return float(_feature_table().feature_edit_distance(ref, learner) * SUB_SCALE)
+    except Exception:
+        return 0.6
+
+
 def analyze_words(
     ref_per_word: list[tuple[str, list[str]]],
     learner: list[str],
+    gop: list[float] | None = None,
 ) -> list[WordResult]:
-    """Classify learner phones against the reference, grouped by word."""
+    """Classify learner phones against the reference, grouped by word.
+
+    When *gop* (per-target-phone acoustic confidence) is given, scoring is
+    GOP-based: 发音 = mean GOP, 完成度 = soft saturating coverage, and errors the
+    model is confident about are suppressed. Otherwise falls back to an
+    articulatory-distance penalty.
+    """
     flat_ref: list[str] = []
     word_idx_per_ref: list[int] = []
     for wi, (_, phones) in enumerate(ref_per_word):
@@ -327,66 +365,87 @@ def analyze_words(
             word_learner_indices[wi].append(op.learner_index)
 
     results: list[WordResult] = []
+    flat_offset = 0  # this word's start index into the flat gop / target phones
     for wi, (word, target_phones) in enumerate(ref_per_word):
         ops_for_word = word_ops.get(wi, [])
         indices = word_learner_indices.get(wi, [])
         learner_start = min(indices) if indices else 0
         learner_end = max(indices) + 1 if indices else 0
+        target_count = max(len(target_phones), 1)
+
+        def _gop_ok(ri: int) -> bool:
+            gi = flat_offset + ri
+            return gop is not None and 0 <= gi < len(gop) and gop[gi] >= GOP_OK
+
         errors: list[WordError] = []
-        position = 0
+        ref_pos = 0  # index into this word's target_phones
         for op in ops_for_word:
             if op.kind == "match":
-                position += 1
+                ref_pos += 1
                 continue
-
             if op.kind == "sub":
                 ref_phone = op.ref or ""
                 learner_phone = op.learner or ""
-                if _in_pair_set(ref_phone, learner_phone, VOWEL_REDUCTION_PAIRS):
-                    position += 1
+                # Accent-like reductions, or the model being confident it was
+                # said, are not errors.
+                if _in_pair_set(ref_phone, learner_phone, VOWEL_REDUCTION_PAIRS) or _gop_ok(ref_pos):
+                    ref_pos += 1
                     continue
                 label = _label_for_sub(ref_phone, learner_phone)
                 l1_pattern = (ref_phone, learner_phone) in L1_PATTERN_LABELS
-                confidence = "high" if l1_pattern else "medium"
                 errors.append(
                     WordError(
-                        position=position,
-                        expected=ref_phone,
-                        actual=learner_phone,
-                        label=label,
-                        l1_pattern=l1_pattern,
-                        confidence=confidence,
+                        position=ref_pos, expected=ref_phone, actual=learner_phone,
+                        label=label, l1_pattern=l1_pattern,
+                        confidence="high" if l1_pattern else "medium", ref_index=ref_pos,
                     )
                 )
-                position += 1
+                ref_pos += 1
             elif op.kind == "ins":
                 errors.append(
                     WordError(
-                        position=position,
-                        expected=None,
-                        actual=op.learner,
-                        label=f"extra sound ({op.learner})",
-                        l1_pattern=False,
-                        confidence="medium",
+                        position=ref_pos, expected=None, actual=op.learner,
+                        label=f"extra sound ({op.learner})", l1_pattern=False,
+                        confidence="medium", ref_index=min(ref_pos, target_count - 1),
                     )
                 )
-                position += 1
+                # insertion does not consume a reference phone
             elif op.kind == "del":
-                errors.append(
-                    WordError(
-                        position=position,
-                        expected=op.ref,
-                        actual=None,
-                        label=f"missing sound ({op.ref})",
-                        l1_pattern=False,
-                        confidence="medium",
+                if not _gop_ok(ref_pos):  # the model didn't hear it → real omission
+                    errors.append(
+                        WordError(
+                            position=ref_pos, expected=op.ref, actual=None,
+                            label=f"missing sound ({op.ref})", l1_pattern=False,
+                            confidence="medium", ref_index=ref_pos,
+                        )
                     )
-                )
+                ref_pos += 1
 
-        target_count = max(len(target_phones), 1)
-        # Cap error penalty so a single bad word doesn't dominate.
-        effective_errors = min(len(errors), target_count * 2)
-        score = max(0.0, 1.0 - effective_errors / target_count)
+        # Score (发音) + coverage (完成度).
+        gop_seg = (
+            gop[flat_offset : flat_offset + len(target_phones)]
+            if gop is not None and flat_offset + len(target_phones) <= len(gop)
+            else None
+        )
+        if gop_seg:
+            score = sum(gop_seg) / len(gop_seg)
+            # Soft, saturating coverage: full credit once GOP reaches COVERAGE_OK,
+            # partial below. min(g/OK,1) >= g, so 完成度 is never below 发音.
+            word_coverage = sum(min(g / COVERAGE_OK, 1.0) for g in gop_seg) / len(gop_seg)
+        else:
+            penalty = 0.0
+            for e in errors:
+                if e.expected and e.actual:
+                    penalty += _sub_penalty(e.expected, e.actual)
+                elif e.expected:
+                    penalty += DEL_PENALTY
+                else:
+                    penalty += INS_PENALTY
+            penalty = min(penalty, float(target_count))
+            score = max(0.0, 1.0 - penalty / target_count) ** 0.7
+            word_coverage = score
+
+        flat_offset += len(target_phones)
         results.append(
             WordResult(
                 word=word,
@@ -394,6 +453,8 @@ def analyze_words(
                 learner_ipa="".join(word_learner.get(wi, [])),
                 errors=errors[:3],  # show at most 3 errors per word in UI
                 score=round(score, 2),
+                target_phones=list(target_phones),
+                coverage=round(word_coverage, 2),
                 learner_start=learner_start,
                 learner_end=learner_end,
             )
@@ -469,7 +530,12 @@ def _normalize_learner_tokens(tokens: Sequence[str]) -> list[str]:
     return out
 
 
-def analyze(target_text: str, learner_tokens: Sequence[str], language: str = "en-us") -> dict:
+def analyze(
+    target_text: str,
+    learner_tokens: Sequence[str],
+    language: str = "en-us",
+    gop: list[float] | None = None,
+) -> dict:
     """Analyse learner pronunciation against *target_text*.
 
     Parameters
@@ -490,7 +556,7 @@ def analyze(target_text: str, learner_tokens: Sequence[str], language: str = "en
     sentences = split_sentences(target_text)
 
     if len(sentences) <= 1:
-        words = analyze_words(reference_ipa_per_word(target_text, language=language), learner)
+        words = analyze_words(reference_ipa_per_word(target_text, language=language), learner, gop=gop)
     else:
         per_sentence_refs = [reference_ipa_per_word(s, language=language) for s in sentences]
         flat_ref: list[str] = []
@@ -513,15 +579,26 @@ def analyze(target_text: str, learner_tokens: Sequence[str], language: str = "en
     weighted = sum(w.score * len(w.target_ipa) for w in words)
     overall = round(weighted / total_target, 2)
 
+    # 完成度 (reading completeness): soft, saturating coverage from GOP; kept >=
+    # 发音 so the two never invert.
+    if gop:
+        soft = sum(min(g / COVERAGE_OK, 1.0) for g in gop) / max(len(gop), 1)
+        coverage = round(max(soft, overall), 2)
+    else:
+        coverage = round(sum(w.coverage * len(w.target_ipa) for w in words) / total_target, 2)
+
     return {
         "overall_score": overall,
+        "coverage": coverage,
         "sentences": sentences,
         "words": [
             {
                 "word": w.word,
                 "target_ipa": w.target_ipa,
+                "target_phones": w.target_phones,
                 "learner_ipa": w.learner_ipa,
                 "score": w.score,
+                "coverage": w.coverage,
                 "learner_start": w.learner_start,
                 "learner_end": w.learner_end,
                 "errors": [asdict(e) for e in w.errors],
