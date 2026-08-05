@@ -97,16 +97,54 @@ def test_segment_whisper_words_merges_comma_phrases():
         {"text": "à", "start": 3.9, "end": 4.0},
         {"text": "fait", "start": 4.0, "end": 4.2},
         {"text": "ordinaire,", "start": 4.2, "end": 4.8},
-        {"text": "parler", "start": 5.0, "end": 5.4},
-        {"text": "de", "start": 5.4, "end": 5.5},
-        {"text": "la", "start": 5.5, "end": 5.6},
-        {"text": "météo,", "start": 5.6, "end": 6.0},
         {"text": "mais", "start": 7.0, "end": 7.3},
         {"text": "en", "start": 7.3, "end": 7.4},
         {"text": "français", "start": 7.4, "end": 7.8},
         {"text": "lent.", "start": 7.8, "end": 8.3},
     ]
-    sentences = segment_whisper_words(whisper_words)
-    assert len(sentences) == 1
-    assert sentences[0].text.endswith("lent.")
-    assert all(len(s.words) <= 20 for s in sentences)
+    # Whisper already provided punctuation; disable restoration so we test the
+    # raw punctuation-based merging path.
+    with patch("src.punct.has_model", return_value=False):
+        sentences = segment_whisper_words(whisper_words)
+    # The comma phrases merge until the chunk is comfortably full (<=12 words).
+    assert len(sentences) == 2
+    assert sentences[0].text.endswith("ordinaire,")
+    assert sentences[-1].text.endswith("lent.")
+    assert all(len(s.words) <= 12 for s in sentences)
+
+
+def test_segment_whisper_words_restores_punctuation_when_sparse():
+    """If Whisper returns almost no punctuation, restore it before splitting."""
+    whisper_words = [
+        {"text": "Aujourd'hui", "start": 0.0, "end": 0.8},
+        {"text": "nous", "start": 2.0, "end": 2.3},
+        {"text": "allons", "start": 2.3, "end": 2.6},
+        {"text": "avoir", "start": 2.6, "end": 2.9},
+        {"text": "une", "start": 2.9, "end": 3.1},
+        {"text": "couverflation", "start": 3.1, "end": 3.6},
+        {"text": "tout", "start": 3.6, "end": 3.9},
+        {"text": "à", "start": 3.9, "end": 4.0},
+        {"text": "fait", "start": 4.0, "end": 4.2},
+        {"text": "ordinaire", "start": 4.2, "end": 4.8},
+        {"text": "parler", "start": 5.0, "end": 5.4},
+        {"text": "de", "start": 5.4, "end": 5.5},
+        {"text": "la", "start": 5.5, "end": 5.6},
+        {"text": "météo", "start": 5.6, "end": 6.0},
+        {"text": "mais", "start": 7.0, "end": 7.3},
+        {"text": "en", "start": 7.3, "end": 7.4},
+        {"text": "français", "start": 7.4, "end": 7.8},
+        {"text": "lent", "start": 7.8, "end": 8.3},
+    ]
+
+    restored = (
+        "Aujourd'hui, nous allons avoir une couverflation tout à fait ordinaire, "
+        "parler de la météo, mais en français lent."
+    )
+
+    with patch("src.punct.has_model", return_value=True):
+        with patch("src.punct.restore_punctuation", return_value=restored):
+            sentences = segment_whisper_words(whisper_words)
+
+    assert len(sentences) >= 2, f"got {len(sentences)} sentences: {[s.text for s in sentences]}"
+    assert all(len(s.words) <= 12 for s in sentences)
+    assert sentences[-1].text.endswith("lent.")

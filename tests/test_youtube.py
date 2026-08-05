@@ -98,7 +98,7 @@ def test_split_text_into_sentence_pieces_commas_split_when_long():
     pieces = _split_text_into_sentence_pieces(text)
     texts = [p[0] for p in pieces]
     assert len(texts) >= 2
-    assert all(len(t.split()) <= 20 for t in texts)
+    assert all(len(t.split()) <= 12 for t in texts)
     # The final piece should keep the terminal punctuation.
     assert texts[-1][-1] == "."
 
@@ -132,11 +132,11 @@ def test_segment_sentences_splits_on_long_pause():
 
 def test_segment_sentences_splits_on_max_words():
     raw = [
-        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one", "start": 0.0, "duration": 6.0},
+        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen", "start": 0.0, "duration": 6.0},
     ]
     sentences = _segment_sentences(raw, use_punctuation_model=False)
     assert len(sentences) >= 2
-    assert all(len(s.words) <= 20 for s in sentences)
+    assert all(len(s.words) <= 12 for s in sentences)
 
 
 def test_segment_sentences_no_punctuation_splits_on_pause_and_max_words():
@@ -145,8 +145,8 @@ def test_segment_sentences_no_punctuation_splits_on_pause_and_max_words():
         {"text": "une conversation tout à fait ordinaire parler de la météo", "start": 7.5, "duration": 4.0},
     ]
     sentences = _segment_sentences(raw, use_punctuation_model=False)
-    assert len(sentences) >= 2
-    assert all(len(s.text.split()) <= 20 for s in sentences)
+    assert len(sentences) >= 3
+    assert all(len(s.text.split()) <= 12 for s in sentences)
 
 
 def test_segment_sentences_commas_stay_together_when_short():
@@ -174,10 +174,12 @@ def test_segment_sentences_merge_comma_phrases_across_long_pauses():
     ]
     sentences = _segment_sentences(raw, use_punctuation_model=False)
     texts = [s.text for s in sentences]
-    assert len(sentences) == 2, f"expected 2 sentences, got {len(sentences)}: {texts}"
-    assert texts[0].endswith("français lent.")
-    assert texts[1].endswith("discord.")
-    assert all(len(s.text.split()) <= 20 for s in sentences)
+    assert len(sentences) == 4, f"expected 4 sentences, got {len(sentences)}: {texts}"
+    assert texts[0].endswith("ordinaire,")
+    assert texts[1].endswith("lent.")
+    assert texts[2].endswith("avril,")
+    assert texts[3].endswith("discord.")
+    assert all(len(s.text.split()) <= 12 for s in sentences)
 
 
 def test_segment_sentences_word_times_are_monotonic():

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _STRONG_END = re.compile(r"(?<=[.!?…])\s+")
 _WEAK_END = re.compile(r"(?<=[,;])\s+")
 _WORD_SPLIT = re.compile(r"\s+")
-_MAX_SENTENCE_WORDS = 20
+_MAX_SENTENCE_WORDS = 12
 _PAUSE_THRESHOLD_S = 1.2
 
 

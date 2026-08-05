@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -39,7 +40,8 @@ _CANDIDATE_NAMES = ("whisper-small", "whisper-base")
 _MAX_WORD_DURATION_S = 2.5
 
 # Sentence segmentation parameters (same semantics as src.youtube rule-based splitter).
-_MAX_SENTENCE_WORDS = 20
+# Keep shadow-reading chunks short enough to hold in working memory.
+_MAX_SENTENCE_WORDS = 12
 _PAUSE_THRESHOLD_S = 1.2
 
 # Whisper timestamp token IDs for the 30-second model are in this range.
@@ -339,70 +341,153 @@ def align_sentences(
     return result
 
 
-def _ends_with_weak_boundary(buffer: list[WordToken]) -> bool:
-    if not buffer:
+_STRONG_END = re.compile(r"(?<=[.!?…])\s+")
+_WEAK_END = re.compile(r"(?<=[,;])\s+")
+_WORD_SPLIT = re.compile(r"\s+")
+
+
+def _is_punctuation_sparse(text: str, threshold: float = 0.15) -> bool:
+    """Return True if *text* has very few terminal punctuation marks."""
+    words = text.split()
+    if not words:
         return False
-    return buffer[-1].text.rstrip()[-1] in ",;:"
+    terminals = sum(1 for w in words if w and w[-1] in ".!?…")
+    return terminals / len(words) < threshold
+
+
+def _split_punctuated_text(text: str) -> list[tuple[str, int, bool]]:
+    """Split restored/annotated text into sentence-sized pieces.
+
+    Strong boundaries (. ! ? …) always end a sentence. Weak boundaries (, ;)
+    are used to keep chunks short enough for shadow-reading: we flush at a weak
+    boundary once the buffer is at least half the maximum comfortable size.
+    Returns (piece_text, word_count, is_terminal).
+    """
+    text = text.replace("\n", " ").strip()
+    if not text:
+        return []
+
+    words = text.split()
+    result: list[tuple[str, int, bool]] = []
+    buffer: list[str] = []
+    soft_limit = _MAX_SENTENCE_WORDS // 2
+
+    for i, word in enumerate(words):
+        buffer.append(word)
+        buf_count = len(buffer)
+        last_char = word[-1] if word else ""
+        is_terminal = last_char in ".!?"
+        is_weak = last_char in ",;:"
+
+        # Terminal punctuation or hard cap always flushes.
+        if is_terminal or buf_count >= _MAX_SENTENCE_WORDS:
+            joined = " ".join(buffer)
+            result.append((joined, buf_count, is_terminal))
+            buffer = []
+            continue
+
+        # At a weak boundary, flush once we have a comfortable chunk so the
+        # next comma phrase does not make the sentence too long.
+        if is_weak and buf_count >= soft_limit:
+            joined = " ".join(buffer)
+            result.append((joined, buf_count, False))
+            buffer = []
+
+    if buffer:
+        joined = " ".join(buffer)
+        result.append((joined, len(buffer), joined[-1] in ".!?"))
+
+    return result
 
 
 def segment_whisper_words(words: list[dict[str, Any]]) -> list[Sentence]:
     """Group Whisper word-level timings into sentences.
 
-    Mirrors the rule-based logic in src.youtube: terminal punctuation always
-    ends a sentence, weak punctuation (comma/semicolon/colon) is ignored unless
-    the buffer would exceed the comfortable word limit, and long pauses split
-    only when we are not mid-comma-phrase.
+    If Whisper produced sparse punctuation (common with base/small on clean
+    speech), restore punctuation with the local model first, then split at
+    real sentence boundaries. This prevents long unpunctuated runs from
+    becoming one giant sentence.
     """
     if not words:
         return []
 
-    sentences: list[Sentence] = []
-    buffer: list[WordToken] = []
-    text_buffer: list[str] = []
-    prev_end = 0.0
+    # Build both raw and clean texts. Raw keeps Whisper's own punctuation; clean
+    # is what we feed the restoration model if the raw output is too sparse.
+    raw_texts: list[str] = []
+    clean_texts: list[str] = []
+    for w in words:
+        t = w["text"].strip()
+        raw_texts.append(t)
+        clean = t.rstrip(".,!?;:\"'()[]{}«»…")
+        clean_texts.append(clean if clean else t)
 
-    def flush() -> None:
-        nonlocal buffer, text_buffer
-        if not buffer:
-            return
+    raw_full_text = " ".join(raw_texts)
+    clean_full_text = " ".join(clean_texts)
+
+    # Restore punctuation if Whisper didn't provide enough.
+    try:
+        from src.punct import has_model, restore_punctuation
+
+        if has_model() and _is_punctuation_sparse(raw_full_text):
+            punctuated = restore_punctuation(clean_full_text)
+        else:
+            punctuated = raw_full_text
+    except Exception as exc:
+        logger.warning("punctuation restoration failed: %s", exc)
+        punctuated = raw_full_text
+
+    pieces = _split_punctuated_text(punctuated)
+    if not pieces:
+        return []
+
+    sentences: list[Sentence] = []
+    word_cursor = 0
+    for piece_text, word_count, _ in pieces:
+        if word_cursor >= len(words):
+            break
+        piece_words = words[word_cursor : word_cursor + word_count]
+        word_cursor += word_count
+        if not piece_words:
+            continue
+
+        clean_tokens: list[WordToken] = []
+        for w in piece_words:
+            raw_text = w["text"].strip()
+            clean_text = raw_text.rstrip(".,!?;:\"'()[]{}«»…")
+            if not clean_text:
+                clean_text = raw_text
+            clean_tokens.append(WordToken(text=clean_text, start=w["start"], end=w["end"]))
+
         sentences.append(
             Sentence(
-                text=" ".join(text_buffer),
-                start=buffer[0].start,
-                end=buffer[-1].end,
-                words=list(buffer),
+                text=piece_text,
+                start=clean_tokens[0].start,
+                end=clean_tokens[-1].end,
+                words=clean_tokens,
             )
         )
-        buffer = []
-        text_buffer = []
 
-    for w in words:
-        raw_text = w["text"].strip()
-        if not raw_text:
-            continue
-        start = float(w["start"])
-        end = float(w["end"])
+    # Append any leftover words (e.g. if punctuation model dropped some).
+    if word_cursor < len(words):
+        leftover = words[word_cursor:]
+        clean_tokens = []
+        display_texts: list[str] = []
+        for w in leftover:
+            raw_text = w["text"].strip()
+            display_texts.append(raw_text)
+            clean_text = raw_text.rstrip(".,!?;:\"'()[]{}«»…")
+            if not clean_text:
+                clean_text = raw_text
+            clean_tokens.append(WordToken(text=clean_text, start=w["start"], end=w["end"]))
+        sentences.append(
+            Sentence(
+                text=" ".join(display_texts),
+                start=clean_tokens[0].start,
+                end=clean_tokens[-1].end,
+                words=clean_tokens,
+            )
+        )
 
-        # Long silence starts a new sentence unless we're in a comma-separated phrase.
-        if buffer and start - prev_end > _PAUSE_THRESHOLD_S and not _ends_with_weak_boundary(buffer):
-            flush()
-
-        # Store display text with punctuation, but a clean token for analysis/highlighting.
-        clean_text = raw_text.rstrip(".,!?;:\"'()[]{}«»…")
-        if not clean_text:
-            clean_text = raw_text
-        buffer.append(WordToken(text=clean_text, start=start, end=end))
-        text_buffer.append(raw_text)
-
-        # Hard cap: flush before the next chunk would overflow.
-        if len(buffer) >= _MAX_SENTENCE_WORDS:
-            flush()
-        elif raw_text[-1] in ".!?…":
-            flush()
-
-        prev_end = end
-
-    flush()
     return sentences
 
 
