@@ -1,6 +1,5 @@
 "use client";
 
-import { blobToWav } from "@/lib/audio";
 import { logRecorder, logRecorderError } from "@/lib/clientLogger";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -131,8 +130,9 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
       // MediaRecorder fires `stop` immediately after `stop()` is called, but the
       // final `dataavailable` event is queued separately. Wait long enough for
       // the last chunk (which contains the container footer) to be appended
-      // before we build the Blob.
-      setTimeout(async () => {
+      // before we build the Blob. The backend now decodes webm/opus/mp4 via a
+      // temp-file fallback, so we send the original container as-is.
+      setTimeout(() => {
         const durationMs = Date.now() - startedAt;
         const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
         logRecorder("recorder stopped", {
@@ -150,20 +150,7 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
           return;
         }
 
-        const rawBlob = new Blob(chunksRef.current, { type: chosenType || "audio/webm" });
-        try {
-          const wavBlob = await blobToWav(rawBlob);
-          logRecorder("converted recording to wav", {
-            originalSize: rawBlob.size,
-            wavSize: wavBlob.size,
-          });
-          onComplete(wavBlob);
-        } catch (err) {
-          logRecorderError("wav conversion failed, sending original container", {
-            error: String(err),
-          });
-          onComplete(rawBlob);
-        }
+        onComplete(new Blob(chunksRef.current, { type: chosenType || "audio/webm" }));
       }, 100);
     };
     mr.start(100);
