@@ -355,60 +355,9 @@ def fetch_video_info(url: str, preferred_language: str = "fr-fr") -> dict[str, A
     }
 
 
-def fetch_transcript(video_id: str, language: str = "fr-fr") -> dict[str, Any]:
-    """Fetch and segment a transcript into sentences with word timings.
-
-    Prefer the local Whisper model for real audio-aligned word timestamps; fall
-    back to YouTube's caption entries if Whisper is unavailable or fails.
-
-    Raises:
-        TranscriptError: if no captions are available and Whisper fails.
-    """
-    target_code = _iso_639_1(language)
-
-    try:
-        transcript = YouTubeTranscriptApi().fetch(video_id, languages=[target_code])
-    except TranscriptsDisabled as exc:
-        raise TranscriptError("transcripts are disabled for this video") from exc
-    except NoTranscriptFound as exc:
-        raise TranscriptError(f"no {language} transcript found") from exc
-    except Exception as exc:
-        raise TranscriptError(f"failed to load transcript: {exc}") from exc
-
-    raw = [{"text": s.text, "start": s.start, "duration": s.duration} for s in transcript]
-
-    # Base segmentation from YouTube captions (with punctuation restoration if available).
-    base_sentences = _segment_sentences(raw)
-
-    # Try Whisper alignment: real audio word timings mapped onto caption text.
-    try:
-        from src.whisper_transcribe import align_sentences, available as whisper_available
-
-        if whisper_available():
-            sentences = align_sentences(video_id, base_sentences, language)
-            return {
-                "video_id": video_id,
-                "language": language,
-                "sentence_count": len(sentences),
-                "sentences": [
-                    {
-                        "text": s.text,
-                        "start": round(s.start, 2),
-                        "end": round(s.end, 2),
-                        "words": [
-                            {"text": w.text, "start": round(w.start, 2), "end": round(w.end, 2)}
-                            for w in s.words
-                        ],
-                    }
-                    for s in sentences
-                ],
-            }
-    except Exception as exc:
-        logger.warning("Whisper transcript failed, falling back to YouTube captions: %s", exc)
-
-    # Fallback: YouTube captions with evenly-divided word durations.
-    sentences = base_sentences
-
+def _sentences_to_response(
+    video_id: str, language: str, sentences: list[Sentence]
+) -> dict[str, Any]:
     return {
         "video_id": video_id,
         "language": language,
@@ -426,3 +375,68 @@ def fetch_transcript(video_id: str, language: str = "fr-fr") -> dict[str, Any]:
             for s in sentences
         ],
     }
+
+
+def _fetch_manual_caption(video_id: str, language: str) -> list[dict[str, Any]] | None:
+    """Return manually-authored captions for *language* if they exist.
+
+    Auto-generated captions are treated as absent and return None so that we
+    fall back to Whisper, which has more accurate timings for shadow-reading.
+    """
+    target_code = _iso_639_1(language)
+    try:
+        transcripts = YouTubeTranscriptApi().list(video_id)
+    except Exception as exc:
+        logger.debug("could not list transcripts for %s: %s", video_id, exc)
+        return None
+
+    for t in transcripts:
+        if _iso_639_1(t.language_code) == target_code and not t.is_generated:
+            logger.info("Using manual caption: %s", t.language_code)
+            return [{"text": s.text, "start": s.start, "duration": s.duration} for s in t.fetch()]
+
+    logger.info("No manual caption found for %s, will use Whisper", language)
+    return None
+
+
+def fetch_transcript(video_id: str, language: str = "fr-fr") -> dict[str, Any]:
+    """Fetch and segment a transcript into sentences with word timings.
+
+    Priority:
+        1. Manually-authored YouTube captions in the requested language.
+           These are aligned with Whisper word timings for accurate playback.
+        2. Whisper-only transcription (auto-generated captions are ignored).
+
+    Raises:
+        TranscriptError: if no manual captions are available and Whisper fails
+                         or is not present.
+    """
+    # 1. Prefer manual captions and align them to real audio timings.
+    manual_raw = _fetch_manual_caption(video_id, language)
+    if manual_raw is not None:
+        base_sentences = _segment_sentences(manual_raw)
+        try:
+            from src.whisper_transcribe import align_sentences, available as whisper_available
+
+            if whisper_available():
+                sentences = align_sentences(video_id, base_sentences, language)
+                return _sentences_to_response(video_id, language, sentences)
+        except Exception as exc:
+            logger.warning("Whisper alignment failed, using caption timings: %s", exc)
+        return _sentences_to_response(video_id, language, base_sentences)
+
+    # 2. No manual captions: fall back to Whisper-only transcription.
+    try:
+        from src.whisper_transcribe import available as whisper_available, segment_whisper_words
+
+        if not whisper_available():
+            raise TranscriptError("no manual captions and no local Whisper model")
+
+        from src.whisper_transcribe import _load_whisper_words
+
+        sentences = segment_whisper_words(_load_whisper_words(video_id, language))
+        return _sentences_to_response(video_id, language, sentences)
+    except TranscriptError:
+        raise
+    except Exception as exc:
+        raise TranscriptError(f"Whisper transcription failed: {exc}") from exc

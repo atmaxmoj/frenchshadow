@@ -24,6 +24,44 @@ def test_extract_video_id_invalid():
     assert extract_video_id("https://example.com") is None
 
 
+def test_fetch_manual_caption_prefers_manual_over_generated():
+    """Auto-generated captions must be ignored; manual captions are returned."""
+    from unittest.mock import MagicMock, patch
+
+    from src.youtube import _fetch_manual_caption
+
+    manual_snippet = MagicMock()
+    manual_snippet.text = "bonjour"
+    manual_snippet.start = 0.0
+    manual_snippet.duration = 1.0
+
+    generated_snippet = MagicMock()
+    generated_snippet.text = "salut"
+    generated_snippet.start = 0.0
+    generated_snippet.duration = 1.0
+
+    manual_transcript = MagicMock()
+    manual_transcript.language_code = "fr"
+    manual_transcript.is_generated = False
+    manual_transcript.fetch.return_value = [manual_snippet]
+
+    generated_transcript = MagicMock()
+    generated_transcript.language_code = "fr"
+    generated_transcript.is_generated = True
+    generated_transcript.fetch.return_value = [generated_snippet]
+
+    api = MagicMock()
+    api.list.return_value = [generated_transcript, manual_transcript]
+
+    with patch("src.youtube.YouTubeTranscriptApi", return_value=api):
+        result = _fetch_manual_caption("dummy", "fr-fr")
+
+    assert result is not None
+    assert result[0]["text"] == "bonjour"
+    manual_transcript.fetch.assert_called_once()
+    generated_transcript.fetch.assert_not_called()
+
+
 def test_split_text_into_sentence_pieces_basic():
     pieces = _split_text_into_sentence_pieces("Hello world. How are you? I'm fine.")
     texts = [p[0] for p in pieces]
