@@ -13,6 +13,8 @@ import io
 import logging
 import os
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import librosa
@@ -59,22 +61,68 @@ def load_model(device: str | None = None) -> tuple[AutoProcessor, AutoModelForCT
     return _processor, _model, device
 
 
-def load_audio(raw: bytes, target_sr: int = TARGET_SR) -> np.ndarray:
-    """Decode arbitrary audio bytes to a mono float32 array at *target_sr*.
+def _ffmpeg_decode_stdin(raw: bytes, target_sr: int) -> np.ndarray:
+    """Decode *raw* via ffmpeg reading from stdin."""
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-err_detect",
+            "ignore_err",
+            "-i",
+            "pipe:0",
+            "-ar",
+            str(target_sr),
+            "-ac",
+            "1",
+            "-f",
+            "wav",
+            "pipe:1",
+        ],
+        input=raw,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip() or "ffmpeg failed"
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr.encode("utf-8"))
+    audio, _ = librosa.load(io.BytesIO(proc.stdout), sr=target_sr, mono=True)
+    if audio.size == 0:
+        raise ValueError("ffmpeg decoded audio has zero samples")
+    return audio.astype(np.float32)
 
-    Tries librosa/soundfile first, then falls back to ffmpeg.
+
+def _ffmpeg_decode_file(raw: bytes, target_sr: int) -> np.ndarray:
+    """Decode *raw* via ffmpeg reading from a temporary file.
+
+    Some ffmpeg builds cannot decode webm/opus containers from stdin but can
+    decode the same bytes when they come from a seekable file.
     """
+    suffix = ".webm"
+    # Try to guess a useful extension from the file magic bytes.
+    if raw[:4] == b"RIFF":
+        suffix = ".wav"
+    elif raw[:4] == b"ftyp":
+        suffix = ".m4a"
+    elif raw[:4] == b"OggS":
+        suffix = ".ogg"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = Path(tmp.name)
+
     try:
-        audio, _ = librosa.load(io.BytesIO(raw), sr=target_sr, mono=True)
-        return audio.astype(np.float32)
-    except Exception:
         proc = subprocess.run(
             [
                 "ffmpeg",
+                "-hide_banner",
                 "-loglevel",
                 "error",
+                "-err_detect",
+                "ignore_err",
                 "-i",
-                "pipe:0",
+                str(tmp_path),
                 "-ar",
                 str(target_sr),
                 "-ac",
@@ -83,12 +131,54 @@ def load_audio(raw: bytes, target_sr: int = TARGET_SR) -> np.ndarray:
                 "wav",
                 "pipe:1",
             ],
-            input=raw,
             capture_output=True,
-            check=True,
         )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip() or "ffmpeg failed"
+            raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr.encode("utf-8"))
         audio, _ = librosa.load(io.BytesIO(proc.stdout), sr=target_sr, mono=True)
+        if audio.size == 0:
+            raise ValueError("ffmpeg decoded audio has zero samples")
         return audio.astype(np.float32)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def load_audio(raw: bytes, target_sr: int = TARGET_SR) -> np.ndarray:
+    """Decode arbitrary audio bytes to a mono float32 array at *target_sr*.
+
+    Tries librosa/soundfile first, then ffmpeg from stdin, then ffmpeg from a
+    temporary file. The temp-file path is the most reliable for the webm/opus
+    containers produced by Chrome's MediaRecorder with certain ffmpeg builds.
+    """
+    if not raw:
+        raise ValueError("empty audio blob")
+
+    # librosa/soundfile handles WAV/FLAC/OGG but not webm/opus/mp4.
+    try:
+        audio, _ = librosa.load(io.BytesIO(raw), sr=target_sr, mono=True)
+        if audio.size == 0:
+            raise ValueError("decoded audio has zero samples")
+        logger.debug("audio decoded via librosa")
+        return audio.astype(np.float32)
+    except Exception as first:
+        logger.debug("librosa decode failed: %s", first)
+
+    # Fallback 1: ffmpeg from stdin (fastest when it works).
+    try:
+        audio = _ffmpeg_decode_stdin(raw, target_sr)
+        logger.info("audio decoded via ffmpeg stdin (%d bytes)", len(raw))
+        return audio
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "ffmpeg stdin decode failed, trying temp file: %s",
+            exc.stderr.decode("utf-8", errors="replace")[:200],
+        )
+
+    # Fallback 2: ffmpeg from a seekable temp file.
+    audio = _ffmpeg_decode_file(raw, target_sr)
+    logger.info("audio decoded via ffmpeg temp file (%d bytes)", len(raw))
+    return audio
 
 
 def transcribe(audio: np.ndarray, processor: Any | None = None, model: Any | None = None) -> dict:
