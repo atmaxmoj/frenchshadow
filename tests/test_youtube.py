@@ -53,12 +53,14 @@ def test_split_text_into_sentence_pieces_commas_split_when_long():
     # Long sentences with commas should be split at weak boundaries.
     text = (
         "Bonjour les amis, et bienvenue dans ce nouvel épisode, "
-        "aujourd'hui nous allons avoir une conversation tout à fait ordinaire."
+        "aujourd'hui nous allons avoir une conversation tout à fait ordinaire, "
+        "parler de la météo, de nos projets pour le weekend, "
+        "bref, faire un peu de small talk, mais en français lent."
     )
     pieces = _split_text_into_sentence_pieces(text)
     texts = [p[0] for p in pieces]
     assert len(texts) >= 2
-    assert all(len(t.split()) <= 15 for t in texts)
+    assert all(len(t.split()) <= 20 for t in texts)
     # The final piece should keep the terminal punctuation.
     assert texts[-1][-1] == "."
 
@@ -92,11 +94,11 @@ def test_segment_sentences_splits_on_long_pause():
 
 def test_segment_sentences_splits_on_max_words():
     raw = [
-        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen", "start": 0.0, "duration": 6.0},
+        {"text": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one", "start": 0.0, "duration": 6.0},
     ]
     sentences = _segment_sentences(raw, use_punctuation_model=False)
     assert len(sentences) >= 2
-    assert all(len(s.words) <= 15 for s in sentences)
+    assert all(len(s.words) <= 20 for s in sentences)
 
 
 def test_segment_sentences_no_punctuation_splits_on_pause_and_max_words():
@@ -106,7 +108,7 @@ def test_segment_sentences_no_punctuation_splits_on_pause_and_max_words():
     ]
     sentences = _segment_sentences(raw, use_punctuation_model=False)
     assert len(sentences) >= 2
-    assert all(len(s.text.split()) <= 15 for s in sentences)
+    assert all(len(s.text.split()) <= 20 for s in sentences)
 
 
 def test_segment_sentences_commas_stay_together_when_short():
@@ -117,6 +119,27 @@ def test_segment_sentences_commas_stay_together_when_short():
     sentences = _segment_sentences(raw, use_punctuation_model=False)
     assert len(sentences) == 1
     assert sentences[0].text == "Bonjour, comment ça va ?"
+
+
+def test_segment_sentences_merge_comma_phrases_across_long_pauses():
+    # YouTube captions for slow-spoken videos often emit one comma phrase per
+    # entry with >1s gaps. Those gaps are breaths, not sentence boundaries, so
+    # phrases ending in ',' should merge until a terminal '.' is reached.
+    raw = [
+        {"text": "aujourd'hui,", "start": 0.0, "duration": 0.8},
+        {"text": "nous allons avoir une conversation tout à fait ordinaire,", "start": 2.0, "duration": 2.0},
+        {"text": "parler de la météo,", "start": 5.0, "duration": 1.2},
+        {"text": "mais en français lent.", "start": 7.0, "duration": 1.5},
+        {"text": "et avant de commencer,", "start": 9.5, "duration": 1.0},
+        {"text": "on vous rappelle que le 1er avril,", "start": 11.5, "duration": 1.5},
+        {"text": "notre club de lecture commence sur discord.", "start": 14.0, "duration": 2.0},
+    ]
+    sentences = _segment_sentences(raw, use_punctuation_model=False)
+    texts = [s.text for s in sentences]
+    assert len(sentences) == 2, f"expected 2 sentences, got {len(sentences)}: {texts}"
+    assert texts[0].endswith("français lent.")
+    assert texts[1].endswith("discord.")
+    assert all(len(s.text.split()) <= 20 for s in sentences)
 
 
 def test_segment_sentences_word_times_are_monotonic():

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _STRONG_END = re.compile(r"(?<=[.!?…])\s+")
 _WEAK_END = re.compile(r"(?<=[,;])\s+")
 _WORD_SPLIT = re.compile(r"\s+")
-_MAX_SENTENCE_WORDS = 15
+_MAX_SENTENCE_WORDS = 20
 _PAUSE_THRESHOLD_S = 1.2
 
 
@@ -242,6 +242,12 @@ def _segment_sentences_rule_based(raw_entries: list[dict[str, Any]]) -> list[Sen
         buffer_start = None
         buffer_end = None
 
+    def _ends_with_weak_boundary(texts: list[str]) -> bool:
+        """True if the pending sentence ends with a comma/semicolon/colon."""
+        if not texts:
+            return False
+        return texts[-1].rstrip()[-1] in ",;:"
+
     for entry in raw_entries:
         entry_start = float(entry["start"])
         entry_duration = float(entry.get("duration", 0))
@@ -250,8 +256,14 @@ def _segment_sentences_rule_based(raw_entries: list[dict[str, Any]]) -> list[Sen
         if not text:
             continue
 
-        # Start a new sentence after a long silence.
-        if buffer_texts and entry_start - prev_end > _PAUSE_THRESHOLD_S:
+        # A long silence starts a new sentence only if we are not in the middle
+        # of a comma-separated phrase. In slow-spoken videos each comma phrase
+        # often arrives as its own caption entry with a breath-pause between.
+        if (
+            buffer_texts
+            and entry_start - prev_end > _PAUSE_THRESHOLD_S
+            and not _ends_with_weak_boundary(buffer_texts)
+        ):
             flush()
 
         pieces = _split_text_into_sentence_pieces(text)
@@ -271,6 +283,14 @@ def _segment_sentences_rule_based(raw_entries: list[dict[str, Any]]) -> list[Sen
             for chunk_text, chunk_count, chunk_terminal in _chunk_piece(
                 piece, word_count, is_terminal, _MAX_SENTENCE_WORDS
             ):
+                # Hard cap: flush before the incoming chunk would overflow, so
+                # no sentence exceeds the comfortable word limit.
+                if (
+                    buffer_texts
+                    and len(buffer_words) + chunk_count > _MAX_SENTENCE_WORDS
+                ):
+                    flush()
+
                 chunk_start = piece_start + word_offset * per_word_duration
                 chunk_end = piece_start + (word_offset + chunk_count) * per_word_duration
                 if buffer_start is None:
@@ -291,7 +311,7 @@ def _segment_sentences_rule_based(raw_entries: list[dict[str, Any]]) -> list[Sen
 
                 word_offset += chunk_count
 
-                # Flush at terminal punctuation, max word count, or long chunk.
+                # Flush at terminal punctuation or when the hard cap is reached.
                 if chunk_terminal or len(buffer_words) >= _MAX_SENTENCE_WORDS:
                     flush()
 
