@@ -28,6 +28,7 @@ from src.models import TARGET_SR, load_audio, load_model, transcribe
 from src.liaison import detect_liaisons, reference_text_for_word
 from src.diagrams import diagram as mouth_diagram, has_diagram
 from src.tts import synthesize
+from src.translate import translate_sentences
 from src.youtube import TranscriptError, extract_video_id, fetch_transcript, fetch_video_info
 from src.storage import (
     get_attempts,
@@ -61,6 +62,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log every request so the 8767 backend logs are actionable."""
+    start = asyncio.get_event_loop().time()
+    response = await call_next(request)
+    elapsed = (asyncio.get_event_loop().time() - start) * 1000
+    logger.info(
+        "%s %s %s - %.2fms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed,
+    )
+    return response
 
 @app.get("/health")
 def health() -> dict:
@@ -122,15 +139,33 @@ async def transcribe_endpoint(
     if not raw:
         raise HTTPException(status_code=400, detail="empty audio")
 
+    logger.info(
+        "transcribe request: %d bytes, filename=%s, content_type=%s",
+        len(raw),
+        audio.filename or "",
+        audio.content_type or "",
+    )
+
     # No extra noise reduction: the browser mic already applies noiseSuppression,
     # and a second spectral-gating pass drops phones the acoustic model would catch.
     try:
         wav = await asyncio.to_thread(load_audio, raw)
     except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or b"").decode("utf-8", errors="replace")[:300]
-        raise HTTPException(status_code=400, detail=f"ffmpeg decode failed: {stderr}")
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace")[:500]
+        logger.warning("audio decode (ffmpeg) failed: %s", stderr)
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法识别这段录音，请确认麦克风正常工作并多读一会儿。详情：{stderr}",
+        ) from e
+    except ValueError as e:
+        logger.warning("audio decode validation failed: %s", e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"录音内容为空或太短，请重新跟读。详情：{e}",
+        ) from e
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"audio decode failed: {e}")
+        logger.exception("audio decode failed")
+        raise HTTPException(status_code=400, detail=f"audio decode failed: {e}") from e
 
     if processor is None or model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
@@ -434,6 +469,63 @@ async def prebake_reference(sentence: str, language: str = "fr-fr") -> dict:
     baked = await asyncio.gather(*[_bake(w) for w in words])
     audios = {word: b64 for word, b64 in baked if b64}
     return {"sentence": sentence, "language": language, "audios": audios}
+
+
+class PrebakeItem(BaseModel):
+    text: str
+    sentence: str = ""
+
+
+class PrebakeRequest(BaseModel):
+    language: str = "fr-fr"
+    items: list[PrebakeItem]
+
+
+@app.post("/prebake")
+async def prebake(req: PrebakeRequest) -> dict:
+    """Warm the TTS cache for a batch of words/phrases.
+
+    The frontend fires this after loading a transcript so individual word
+    reference audio plays instantly when the user clicks a word.  Synthesis is
+    cached on disk, so duplicate requests are no-ops.
+    """
+    if not req.items:
+        return {"queued": 0}
+
+    seen: set[str] = set()
+
+    def _bake(item: PrebakeItem) -> None:
+        key = (req.language, item.text, item.sentence)
+        if key in seen:
+            return
+        seen.add(key)
+        try:
+            tts_text = reference_text_for_word(item.sentence or item.text, item.text, req.language)
+            synthesize(tts_text, language=req.language)
+        except Exception as exc:
+            logger.debug("prebake failed for %r: %s", item.text, exc)
+
+    # Run the batch in a thread pool: TTS is I/O + subprocess bound, not async.
+    await asyncio.to_thread(lambda: [_bake(i) for i in req.items])
+    return {"queued": len(seen)}
+
+
+class TranslateRequest(BaseModel):
+    sentences: list[str]
+    target: str = "zh"
+    source_hint: str = "auto"
+
+
+@app.post("/translate")
+async def translate(req: TranslateRequest) -> dict:
+    """Translate a list of sentences to the requested target language."""
+    cleaned = [s.strip() for s in req.sentences]
+    if not any(cleaned):
+        return {"translations": [""] * len(cleaned)}
+    translations = await asyncio.to_thread(
+        translate_sentences, cleaned, req.source_hint, req.target
+    )
+    return {"translations": translations}
 
 
 @app.get("/reference_audio")

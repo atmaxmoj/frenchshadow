@@ -3,18 +3,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Voice-activity auto-stop: stop after a stretch of silence once past a minimum.
-const SILENCE_THRESHOLD = 0.018;
-const SILENCE_MS = 2500;
+const SILENCE_THRESHOLD = 0.012;
+const SILENCE_MS = 1800;
 const MIN_RECORDING_MS = 1000;
+const MAX_RECORDING_MS = 25000;
 
-// Not every browser supports the same container. Safari, notably, rejects
-// audio/webm and only records audio/mp4. Pick the first supported type and let
-// the backend (ffmpeg) sniff whatever we send. Empty string = browser default.
+// Not every browser supports the same container. Safari rejects audio/webm
+// and only records audio/mp4. Chrome records opus inside a webm container that
+// some ffmpeg builds struggle with; ogg/opus is more reliably decoded. Pick
+// the first supported type and let the backend (ffmpeg) sniff whatever we send.
 const MIME_CANDIDATES = [
+  "audio/ogg;codecs=opus",
   "audio/webm;codecs=opus",
   "audio/webm",
   "audio/mp4",
-  "audio/ogg;codecs=opus",
 ];
 
 function pickMimeType(): string {
@@ -106,10 +108,29 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
     const mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     const chosenType = mr.mimeType;
     chunksRef.current = [];
+    const startedAt = Date.now();
     mr.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
-    mr.onstop = () => onComplete(new Blob(chunksRef.current, { type: chosenType || "audio/webm" }));
+    mr.onstop = () => {
+      // MediaRecorder fires `stop` immediately after `stop()` is called, but the
+      // final `dataavailable` event is queued separately. Wait one tick so the
+      // last chunk (which contains the container footer) is appended before we
+      // build the Blob, otherwise ffmpeg sees an incomplete file and fails with
+      // "Invalid data found when processing input".
+      setTimeout(() => {
+        const durationMs = Date.now() - startedAt;
+        if (chunksRef.current.length === 0 || durationMs < MIN_RECORDING_MS) {
+          console.warn("[recorder] recording too short or empty, discarding", {
+            chunks: chunksRef.current.length,
+            durationMs,
+          });
+          setRecording(false);
+          return;
+        }
+        onComplete(new Blob(chunksRef.current, { type: chosenType || "audio/webm" }));
+      }, 0);
+    };
     mr.start(100);
     mediaRef.current = mr;
     setRecording(true);
@@ -117,7 +138,6 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
     const analyser = analyserRef.current;
     if (!analyser) return;
     const buf = new Uint8Array(analyser.fftSize);
-    const startedAt = Date.now();
     let silenceStart: number | null = null;
     const tick = () => {
       analyser.getByteTimeDomainData(buf);
@@ -136,6 +156,11 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
         }
       } else {
         silenceStart = null;
+      }
+      // Hard ceiling so a noisy room never records forever.
+      if (now - startedAt > MAX_RECORDING_MS) {
+        stop();
+        return;
       }
       rafRef.current = requestAnimationFrame(tick);
     };
