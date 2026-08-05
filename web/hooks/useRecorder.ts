@@ -1,5 +1,6 @@
 "use client";
 
+import { logRecorder, logRecorderError } from "@/lib/clientLogger";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Voice-activity auto-stop: stop after a stretch of silence once past a minimum.
@@ -134,14 +135,14 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
       setTimeout(() => {
         const durationMs = Date.now() - startedAt;
         const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
-        console.log("[recorder] stopped", {
+        logRecorder("recorder stopped", {
           mimeType: chosenType,
           chunks: chunksRef.current.length,
           totalBytes,
           durationMs,
         });
         if (chunksRef.current.length === 0 || durationMs < MIN_RECORDING_MS) {
-          console.warn("[recorder] recording too short or empty, discarding", {
+          logRecorderError("recording too short or empty, discarding", {
             chunks: chunksRef.current.length,
             durationMs,
           });

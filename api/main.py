@@ -40,7 +40,21 @@ from src.storage import (
     touch_video,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+_LOG_FILE = LOG_DIR / "backend.log"
+
+_formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+_file_handler = logging.FileHandler(_LOG_FILE, mode="a", encoding="utf-8")
+_file_handler.setFormatter(_formatter)
+
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+_root_logger.addHandler(_stream_handler)
+_root_logger.addHandler(_file_handler)
+
 logger = logging.getLogger(__name__)
 
 processor: Any | None = None
@@ -526,6 +540,26 @@ async def translate(req: TranslateRequest) -> dict:
         translate_sentences, cleaned, req.source_hint, req.target
     )
     return {"translations": translations}
+
+
+class ClientLogEntry(BaseModel):
+    level: str = "info"
+    message: str
+    context: dict[str, Any] | None = None
+
+
+@app.post("/client_log")
+async def client_log(entry: ClientLogEntry) -> dict:
+    """Accept log entries from the frontend so they are visible server-side."""
+    context = entry.context or {}
+    log_line = f"[client:{entry.level.upper()}] {entry.message} {json.dumps(context, ensure_ascii=False)}"
+    if entry.level.lower() == "error":
+        logger.error(log_line)
+    elif entry.level.lower() == "warning":
+        logger.warning(log_line)
+    else:
+        logger.info(log_line)
+    return {"ok": True}
 
 
 @app.get("/reference_audio")

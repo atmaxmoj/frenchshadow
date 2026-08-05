@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ClientLogInit } from "@/components/ClientLogInit";
 
 export const metadata: Metadata = {
   title: "Lucerne · Shadow Reader",
@@ -9,7 +10,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        <ClientLogInit />
+        {children}
+      </body>
     </html>
   );
 }

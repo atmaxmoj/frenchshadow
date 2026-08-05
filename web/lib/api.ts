@@ -1,4 +1,5 @@
 import type { Analysis, Transcript, VideoInfo, TranscribeResult } from "./types";
+import { logClient } from "./clientLogger";
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -40,9 +41,11 @@ export async function transcribe(
   form.append("audio", blob, filename);
   form.append("target_text", targetText);
   form.append("language", language);
+  logClient("info", "sending transcribe request", { filename, size: blob.size, type: blob.type });
   const res = await fetch("/api/transcribe", { method: "POST", body: form });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
+    logClient("error", "transcribe request failed", { status: res.status, detail: body.detail });
     throw new Error(body.detail ?? `HTTP ${res.status}`);
   }
   return res.json() as Promise<TranscribeResult>;
