@@ -126,32 +126,85 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
     mr.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
+    function buildBlob(): Blob {
+      return new Blob(chunksRef.current, { type: chosenType || "audio/webm" });
+    }
+
+    async function readBlobHeader(blob: Blob): Promise<Uint8Array> {
+      return new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+    }
+
+    function isValidContainer(header: Uint8Array): boolean {
+      // Matroska/WebM starts with the EBML ID 0x1A45DFA3.
+      if (header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3)
+        return true;
+      // Ogg starts with "OggS".
+      if (header[0] === 0x4f && header[1] === 0x67 && header[2] === 0x67 && header[3] === 0x53)
+        return true;
+      // MP4/M4A has 'ftyp' at offset 4.
+      if (
+        header[4] === 0x66 &&
+        header[5] === 0x74 &&
+        header[6] === 0x79 &&
+        header[7] === 0x70
+      )
+        return true;
+      return false;
+    }
+
+    async function finalizeRecording(retry = false) {
+      const durationMs = Date.now() - startedAt;
+      const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
+      logRecorder("recorder stopped", {
+        mimeType: chosenType,
+        chunks: chunksRef.current.length,
+        totalBytes,
+        durationMs,
+      });
+      if (chunksRef.current.length === 0 || durationMs < MIN_RECORDING_MS) {
+        logRecorderError("recording too short or empty, discarding", {
+          chunks: chunksRef.current.length,
+          durationMs,
+        });
+        setRecording(false);
+        return;
+      }
+
+      const blob = buildBlob();
+      const header = await readBlobHeader(blob);
+      if (!isValidContainer(header)) {
+        if (!retry) {
+          // Some browsers queue the final dataavailable after onstop. Wait once
+          // more and rebuild the blob before giving up.
+          logRecorder("container header missing, retrying once", {
+            header: Array.from(header)
+              .map((b) => b.toString(16).padStart(2, "0"))
+              .join(""),
+            totalBytes,
+          });
+          setTimeout(() => finalizeRecording(true), 150);
+          return;
+        }
+        logRecorderError("container header still invalid after retry, discarding", {
+          header: Array.from(header)
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(""),
+          totalBytes,
+          mimeType: chosenType,
+        });
+        setRecording(false);
+        return;
+      }
+
+      onComplete(blob);
+    }
+
     mr.onstop = () => {
       // MediaRecorder fires `stop` immediately after `stop()` is called, but the
       // final `dataavailable` event is queued separately. Wait long enough for
-      // the last chunk (which contains the container footer) to be appended
-      // before we build the Blob. The backend now decodes webm/opus/mp4 via a
-      // temp-file fallback, so we send the original container as-is.
-      setTimeout(() => {
-        const durationMs = Date.now() - startedAt;
-        const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
-        logRecorder("recorder stopped", {
-          mimeType: chosenType,
-          chunks: chunksRef.current.length,
-          totalBytes,
-          durationMs,
-        });
-        if (chunksRef.current.length === 0 || durationMs < MIN_RECORDING_MS) {
-          logRecorderError("recording too short or empty, discarding", {
-            chunks: chunksRef.current.length,
-            durationMs,
-          });
-          setRecording(false);
-          return;
-        }
-
-        onComplete(new Blob(chunksRef.current, { type: chosenType || "audio/webm" }));
-      }, 100);
+      // the last chunk (which contains the container header/footer) to be
+      // appended before we build the Blob.
+      setTimeout(() => finalizeRecording(false), 100);
     };
     mr.start(100);
     mediaRef.current = mr;
