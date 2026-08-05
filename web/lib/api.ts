@@ -21,13 +21,23 @@ export function fetchTranscript(videoId: string, language: string): Promise<Tran
   );
 }
 
+function audioExtension(blob: Blob): string {
+  const t = blob.type || "";
+  if (t.includes("ogg")) return "ogg";
+  if (t.includes("webm")) return "webm";
+  if (t.includes("mp4") || t.includes("m4a")) return "m4a";
+  if (t.includes("wav")) return "wav";
+  return "webm";
+}
+
 export async function transcribe(
   blob: Blob,
   targetText: string,
   language: string,
 ): Promise<TranscribeResult> {
   const form = new FormData();
-  form.append("audio", blob, "recording.webm");
+  const filename = `recording.${audioExtension(blob)}`;
+  form.append("audio", blob, filename);
   form.append("target_text", targetText);
   form.append("language", language);
   const res = await fetch("/api/transcribe", { method: "POST", body: form });
@@ -137,7 +147,7 @@ export async function saveAttempt(p: {
   totalSentences: number;
 }): Promise<string | null> {
   const form = new FormData();
-  form.append("audio", p.blob, "attempt.webm");
+  form.append("audio", p.blob, `attempt.${audioExtension(p.blob)}`);
   form.append("video_id", p.videoId);
   form.append("sentence_idx", String(p.sentenceIdx));
   form.append("sentence_text", p.sentenceText);

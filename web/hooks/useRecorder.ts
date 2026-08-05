@@ -91,7 +91,20 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
   const stop = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
     const mr = mediaRef.current;
-    if (mr && mr.state !== "inactive") mr.stop();
+    if (mr && mr.state === "recording") {
+      // Flush any buffered audio into a final dataavailable event before
+      // stopping. Some browsers drop the container footer without this.
+      try {
+        mr.requestData();
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        if (mr.state !== "inactive") mr.stop();
+      }, 50);
+    } else if (mr && mr.state !== "inactive") {
+      mr.stop();
+    }
     setRecording(false);
     // Keep the stream/context warm for the next take.
   }, []);
@@ -114,12 +127,19 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
     };
     mr.onstop = () => {
       // MediaRecorder fires `stop` immediately after `stop()` is called, but the
-      // final `dataavailable` event is queued separately. Wait one tick so the
-      // last chunk (which contains the container footer) is appended before we
-      // build the Blob, otherwise ffmpeg sees an incomplete file and fails with
-      // "Invalid data found when processing input".
+      // final `dataavailable` event is queued separately. Wait long enough for
+      // the last chunk (which contains the container footer) to be appended
+      // before we build the Blob, otherwise ffmpeg sees an incomplete file and
+      // fails with "Invalid data found when processing input".
       setTimeout(() => {
         const durationMs = Date.now() - startedAt;
+        const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
+        console.log("[recorder] stopped", {
+          mimeType: chosenType,
+          chunks: chunksRef.current.length,
+          totalBytes,
+          durationMs,
+        });
         if (chunksRef.current.length === 0 || durationMs < MIN_RECORDING_MS) {
           console.warn("[recorder] recording too short or empty, discarding", {
             chunks: chunksRef.current.length,
@@ -129,7 +149,7 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
           return;
         }
         onComplete(new Blob(chunksRef.current, { type: chosenType || "audio/webm" }));
-      }, 0);
+      }, 100);
     };
     mr.start(100);
     mediaRef.current = mr;
