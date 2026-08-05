@@ -92,19 +92,22 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
   const stop = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
     const mr = mediaRef.current;
-    if (mr && mr.state === "recording") {
-      // Flush any buffered audio into a final dataavailable event before
-      // stopping. Some browsers drop the container footer without this.
+    if (!mr || mr.state === "inactive") {
+      setRecording(false);
+      return;
+    }
+    // Guard against double-clicks / auto-stop racing with manual stop.
+    if ((mr as unknown as { _stopping?: boolean })._stopping) return;
+    (mr as unknown as { _stopping?: boolean })._stopping = true;
+
+    if (mr.state === "recording" || mr.state === "paused") {
+      // Stop flushes the final dataavailable event. requestData() before stop()
+      // is not needed and can produce a partial segment on some browsers.
       try {
-        mr.requestData();
+        mr.stop();
       } catch {
         // ignore
       }
-      setTimeout(() => {
-        if (mr.state !== "inactive") mr.stop();
-      }, 50);
-    } else if (mr && mr.state !== "inactive") {
-      mr.stop();
     }
     setRecording(false);
     // Keep the stream/context warm for the next take.
@@ -152,6 +155,12 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
       return false;
     }
 
+    function bytesToHex(buf: Uint8Array): string {
+      return Array.from(buf)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
     async function finalizeRecording(retry = false) {
       const durationMs = Date.now() - startedAt;
       const totalBytes = chunksRef.current.reduce((sum, c) => sum + c.size, 0);
@@ -172,26 +181,26 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
 
       const blob = buildBlob();
       const header = await readBlobHeader(blob);
+      const firstChunkHeader = chunksRef.current.length
+        ? bytesToHex(new Uint8Array(await chunksRef.current[0].slice(0, 16).arrayBuffer()))
+        : "no-chunks";
+      const chunkSizes = chunksRef.current.map((c) => c.size);
+      const headerHex = bytesToHex(header);
+
       if (!isValidContainer(header)) {
         if (!retry) {
           // Some browsers queue the final dataavailable after onstop. Wait once
           // more and rebuild the blob before giving up.
-          logRecorder("container header missing, retrying once", {
-            header: Array.from(header)
-              .map((b) => b.toString(16).padStart(2, "0"))
-              .join(""),
-            totalBytes,
-          });
-          setTimeout(() => finalizeRecording(true), 150);
+          logRecorder(
+            `container header missing, retrying once | header=${headerHex} firstChunk=${firstChunkHeader} sizes=${JSON.stringify(chunkSizes)}`,
+            { mimeType: chosenType }
+          );
+          setTimeout(() => finalizeRecording(true), 300);
           return;
         }
-        logRecorderError("container header still invalid after retry, discarding", {
-          header: Array.from(header)
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join(""),
-          totalBytes,
-          mimeType: chosenType,
-        });
+        logRecorderError(
+          `container header still invalid after retry, discarding | header=${headerHex} firstChunk=${firstChunkHeader} sizes=${JSON.stringify(chunkSizes)} mimeType=${chosenType}`
+        );
         setRecording(false);
         return;
       }
@@ -204,7 +213,7 @@ export function useRecorder(onComplete: (blob: Blob) => void): Recorder {
       // final `dataavailable` event is queued separately. Wait long enough for
       // the last chunk (which contains the container header/footer) to be
       // appended before we build the Blob.
-      setTimeout(() => finalizeRecording(false), 100);
+      setTimeout(() => finalizeRecording(false), 500);
     };
     mr.start(100);
     mediaRef.current = mr;
