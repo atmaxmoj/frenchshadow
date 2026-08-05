@@ -8,6 +8,7 @@ so the UI can ask the user for a transcript or run STT later.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.request
 from dataclasses import dataclass
@@ -16,10 +17,15 @@ from typing import Any
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
+from src.punct import has_model as _has_punct_model, punctuation_is_sparse, restore_punctuation
 
-_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
+logger = logging.getLogger(__name__)
+
+
+_STRONG_END = re.compile(r"(?<=[.!?…])\s+")
+_WEAK_END = re.compile(r"(?<=[,;])\s+")
 _WORD_SPLIT = re.compile(r"\s+")
-_MAX_SENTENCE_WORDS = 10
+_MAX_SENTENCE_WORDS = 15
 _PAUSE_THRESHOLD_S = 1.2
 
 
@@ -73,17 +79,36 @@ def _iso_639_1(language: str) -> str:
 def _split_text_into_sentence_pieces(text: str) -> list[tuple[str, int, bool]]:
     """Split text at sentence boundaries.
 
+    Strong boundaries (. ! ? …) always end a sentence. Weak boundaries (, ;)
+    are only used when a sentence would otherwise exceed the comfortable word
+    limit, so short comma-separated phrases stay together.
+
     Returns a list of (piece_text, word_count, is_terminal).
     """
-    pieces = _SENTENCE_END.split(text.replace("\n", " ").strip())
+    text = text.replace("\n", " ").strip()
+    if not text:
+        return []
+
     result: list[tuple[str, int, bool]] = []
-    for piece in pieces:
-        piece = piece.strip()
-        if not piece:
+    for strong in _STRONG_END.split(text):
+        strong = strong.strip()
+        if not strong:
             continue
-        is_terminal = piece[-1] in ".!?"
-        word_count = len(_WORD_SPLIT.split(piece))
-        result.append((piece, word_count, is_terminal))
+        word_count = len(_WORD_SPLIT.split(strong))
+        if word_count <= _MAX_SENTENCE_WORDS:
+            is_terminal = strong[-1] in ".!?"
+            result.append((strong, word_count, is_terminal))
+            continue
+
+        # Long sentence: also split at weak boundaries so it stays readable.
+        for weak in _WEAK_END.split(strong):
+            weak = weak.strip()
+            if not weak:
+                continue
+            is_terminal = weak[-1] in ".!?"
+            word_count = len(_WORD_SPLIT.split(weak))
+            result.append((weak, word_count, is_terminal))
+
     return result
 
 
@@ -104,7 +129,89 @@ def _chunk_piece(
     return chunks
 
 
-def _segment_sentences(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
+def _segment_sentences(raw_entries: list[dict[str, Any]], use_punctuation_model: bool = True) -> list[Sentence]:
+    """Group transcript entries into sentences and assign approximate word times.
+
+    If the punctuation restoration model is available and the transcript is
+    sparse on terminal punctuation, restore punctuation first so we can split
+    at real sentence boundaries instead of relying on pauses or word counts.
+    Otherwise fall back to the rule-based segmenter.
+    """
+    if (
+        use_punctuation_model
+        and _has_punct_model()
+        and punctuation_is_sparse(raw_entries)
+    ):
+        sentences = _segment_with_restored_punctuation(raw_entries)
+        if sentences:
+            return sentences
+    return _segment_sentences_rule_based(raw_entries)
+
+
+def _segment_with_restored_punctuation(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
+    """Restore punctuation globally, then split into sentences with timings."""
+    raw_words: list[WordToken] = []
+    for entry in raw_entries:
+        entry_start = float(entry["start"])
+        entry_duration = float(entry.get("duration", 0))
+        entry_end = entry_start + entry_duration
+        text = str(entry.get("text", "")).replace("\n", " ").strip()
+        if not text:
+            continue
+        words = _WORD_SPLIT.split(text)
+        per_word_duration = entry_duration / max(len(words), 1)
+        for i, w in enumerate(words):
+            w_clean = w.strip(".,!?;:\"'()[]{}«»")
+            if not w_clean:
+                continue
+            w_start = entry_start + i * per_word_duration
+            w_end = min(w_start + per_word_duration, entry_end)
+            if w_end <= w_start:
+                w_end = w_start + 0.01
+            raw_words.append(WordToken(w_clean, w_start, w_end))
+
+    if not raw_words:
+        return []
+
+    full_text = " ".join(w.text for w in raw_words)
+    punctuated = restore_punctuation(full_text)
+
+    sentences: list[Sentence] = []
+    word_cursor = 0
+    for sent_text, sent_word_count, _ in _split_text_into_sentence_pieces(punctuated):
+        if not sent_text:
+            continue
+        sent_words: list[WordToken] = []
+        for _ in range(sent_word_count):
+            if word_cursor < len(raw_words):
+                sent_words.append(raw_words[word_cursor])
+                word_cursor += 1
+        if sent_words:
+            sentences.append(
+                Sentence(
+                    text=sent_text,
+                    start=sent_words[0].start,
+                    end=sent_words[-1].end,
+                    words=sent_words,
+                )
+            )
+
+    # Append any leftover words (e.g. if the model produced fewer sentences).
+    if word_cursor < len(raw_words):
+        leftover = raw_words[word_cursor:]
+        sentences.append(
+            Sentence(
+                text=" ".join(w.text for w in leftover),
+                start=leftover[0].start,
+                end=leftover[-1].end,
+                words=leftover,
+            )
+        )
+
+    return sentences
+
+
+def _segment_sentences_rule_based(raw_entries: list[dict[str, Any]]) -> list[Sentence]:
     """Group transcript entries into sentences and assign approximate word times.
 
     Sentences end at punctuation (. ! ? …), after a long pause between entries,
@@ -229,10 +336,13 @@ def fetch_video_info(url: str, preferred_language: str = "fr-fr") -> dict[str, A
 
 
 def fetch_transcript(video_id: str, language: str = "fr-fr") -> dict[str, Any]:
-    """Fetch and segment a YouTube transcript into sentences with word timings.
+    """Fetch and segment a transcript into sentences with word timings.
+
+    Prefer the local Whisper model for real audio-aligned word timestamps; fall
+    back to YouTube's caption entries if Whisper is unavailable or fails.
 
     Raises:
-        TranscriptError: if no captions are available.
+        TranscriptError: if no captions are available and Whisper fails.
     """
     target_code = _iso_639_1(language)
 
@@ -246,7 +356,38 @@ def fetch_transcript(video_id: str, language: str = "fr-fr") -> dict[str, Any]:
         raise TranscriptError(f"failed to load transcript: {exc}") from exc
 
     raw = [{"text": s.text, "start": s.start, "duration": s.duration} for s in transcript]
-    sentences = _segment_sentences(raw)
+
+    # Base segmentation from YouTube captions (with punctuation restoration if available).
+    base_sentences = _segment_sentences(raw)
+
+    # Try Whisper alignment: real audio word timings mapped onto caption text.
+    try:
+        from src.whisper_transcribe import align_sentences, available as whisper_available
+
+        if whisper_available():
+            sentences = align_sentences(video_id, base_sentences, language)
+            return {
+                "video_id": video_id,
+                "language": language,
+                "sentence_count": len(sentences),
+                "sentences": [
+                    {
+                        "text": s.text,
+                        "start": round(s.start, 2),
+                        "end": round(s.end, 2),
+                        "words": [
+                            {"text": w.text, "start": round(w.start, 2), "end": round(w.end, 2)}
+                            for w in s.words
+                        ],
+                    }
+                    for s in sentences
+                ],
+            }
+    except Exception as exc:
+        logger.warning("Whisper transcript failed, falling back to YouTube captions: %s", exc)
+
+    # Fallback: YouTube captions with evenly-divided word durations.
+    sentences = base_sentences
 
     return {
         "video_id": video_id,
