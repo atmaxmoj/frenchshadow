@@ -49,3 +49,20 @@ export function syllablePhones(
   if (!idx.length) return override ? [override] : [];
   return idx.map((i) => (i === refIndex && override ? override : phones[i]));
 }
+
+// The syllable containing `refIndex`, with `insert` added right after that
+// phone — approximates an inserted ("extra") sound in its syllable context.
+export function syllablePhonesInsert(
+  phones: string[],
+  refIndex: number,
+  insert: string,
+): string[] {
+  const idx = syllableIndices(phones, refIndex);
+  if (!idx.length) return [insert];
+  const out: string[] = [];
+  idx.forEach((i) => {
+    out.push(phones[i]);
+    if (i === refIndex) out.push(insert);
+  });
+  return out;
+}

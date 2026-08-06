@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,7 +24,11 @@ from fastapi.responses import FileResponse
 from src.analyzer import analyze, reference_ipa_per_word
 from src.articulatory import attach_tips
 from src.gop import gop_scores
-from src.intelligibility import score as intelligibility_score
+from src.intelligibility import (
+    available as intelligibility_available,
+    preload as intelligibility_preload,
+    score as intelligibility_score,
+)
 from src.grapheme import mark_graphemes
 from src.phoneme_audio import phoneme_wav
 from src.models import TARGET_SR, load_audio, load_model, transcribe
@@ -30,7 +37,10 @@ from src.diagrams import diagram as mouth_diagram, has_diagram
 from src.tts import synthesize
 from src.translate import translate_sentences
 from src.youtube import TranscriptError, extract_video_id, fetch_transcript, fetch_video_info
+from api.cosy3_util import evict_cache
 from src.storage import (
+    RECORDINGS_DIR,
+    get_attempt,
     get_attempts,
     get_recording_path,
     get_recent_videos,
@@ -43,6 +53,16 @@ from src.storage import (
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = LOG_DIR / "backend.log"
+
+COSY3_BASE_URL = os.environ.get("SHADOW_READER_COSY3_URL", "http://localhost:8769")
+COSY3_CACHE_DIR = Path(__file__).resolve().parent.parent / "audio_cache" / "cosy3"
+COSY3_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Configurable resource caps for the clone pipeline:
+# - how many sentences a pre-bake may queue (CPU time, default 30)
+# - how large the on-disk clone cache may grow (default 500 MB, oldest evicted)
+COSY_PREBAKE_MAX = int(os.environ.get("SHADOW_READER_COSY_PREBAKE_MAX", "30"))
+COSY_CACHE_MAX_BYTES = int(os.environ.get("SHADOW_READER_COSY_CACHE_MAX_MB", "500")) * 1024 * 1024
 
 _formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 _stream_handler = logging.StreamHandler()
@@ -60,13 +80,21 @@ logger = logging.getLogger(__name__)
 processor: Any | None = None
 model: Any | None = None
 model_device: str = "cpu"
+_preload_task: asyncio.Task | None = None
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global processor, model, model_device
+    global processor, model, model_device, _preload_task
     processor, model, model_device = load_model()
+    # Warm the Whisper intelligibility model in the background. Its first-use
+    # lazy load takes ~15s, which once pushed /transcribe past the Next.js
+    # dev-proxy timeout and surfaced as a bogus 500 to the learner.
+    if intelligibility_available():
+        _preload_task = asyncio.create_task(asyncio.to_thread(intelligibility_preload))
     logger.info("shadow-reader backend ready on %s", model_device)
     yield
+    if _preload_task is not None and not _preload_task.done():
+        _preload_task.cancel()
 
 
 app = FastAPI(title="shadow-reader backend", version="0.1.0", lifespan=lifespan)
@@ -406,13 +434,147 @@ def list_attempts(video_id: str, sentence_idx: int | None = None) -> dict:
     }
 
 
+def _playback_wav(src: Path, dst: Path) -> bool:
+    """Denoise + loudness-normalize *src* for pleasant playback; True on success.
+
+    The RAW recording is always kept for analysis/cloning (extra denoising drops
+    phones the acoustic model would catch); this processed copy is only for the
+    learner's own ears in history replay.
+
+    Single-pass loudnorm under-normalizes quiet mic takes, so we do it properly:
+    afftdn denoise → measure loudness → linear loudnorm with measured values.
+    """
+    tmp = dst.with_name(f"{dst.stem}.denoise.tmp.wav")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(src), "-af", "afftdn=nf=-25",
+                "-ar", "16000", "-ac", "1", str(tmp),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        measure = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostats",
+                "-i", str(tmp),
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+                "-f", "null", "-",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        stderr = measure.stderr
+        measured = json.loads(stderr[stderr.rindex("{"): stderr.rindex("}") + 1])
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(tmp),
+                "-af",
+                "loudnorm=I=-16:TP=-1.5:LRA=11"
+                f":measured_I={measured['input_i']}"
+                f":measured_TP={measured['input_tp']}"
+                f":measured_LRA={measured['input_lra']}"
+                f":measured_thresh={measured['input_thresh']}"
+                f":offset={measured['target_offset']}"
+                ":linear=true",
+                "-ar", "16000", "-ac", "1", str(dst),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as exc:
+        logger.warning("playback processing failed for %s: %s", src.name, exc)
+        dst.unlink(missing_ok=True)
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 @app.get("/attempts/{attempt_id}/audio")
-def attempt_audio(attempt_id: str) -> FileResponse:
-    """Stream the recorded audio for a persisted attempt."""
+def attempt_audio(attempt_id: str, playback: int = 0) -> FileResponse:
+    """Stream the recorded audio for a persisted attempt.
+
+    playback=1 serves a denoised + loudness-normalized WAV (cached on disk)
+    for history replay; the default is the raw recording.
+    """
     path = get_recording_path(attempt_id)
     if path is None:
         raise HTTPException(status_code=404, detail="recording not found")
+    if playback:
+        processed_dir = path.parent / "processed"
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        processed = processed_dir / f"{attempt_id}.wav"
+        if not processed.exists():
+            _playback_wav(path, processed)
+        if processed.exists():
+            return FileResponse(processed, media_type="audio/wav", filename=processed.name)
+        logger.warning("playback processing unavailable for %s; serving raw", attempt_id)
     return FileResponse(path, media_type="audio/webm", filename=path.name)
+
+
+@app.get("/videos/{video_id}/practice_playlist")
+def practice_playlist(video_id: str, language: str = "fr-fr") -> dict:
+    """One row per practiced sentence (latest attempt): the user's own recording
+    plus, when already baked, the matching CosyVoice3 clone cache key.
+
+    A clone's cache key derives from the voice sample: at practice time that's
+    the sentence's own recording (blob upload) or the attempt id; the rolling
+    pre-bake pins the FIRST recording of a session. We therefore probe the
+    attempt id AND every recording hash this video has.
+    """
+    try:
+        attempts = get_attempts(video_id)
+    except Exception as exc:
+        logger.exception("practice_playlist failed")
+        raise HTTPException(status_code=500, detail=f"playlist failed: {exc}") from exc
+
+    lang = language.strip().lower()
+
+    # Hash every distinct recording once — any of them may have been a
+    # clone voice sample (per-sentence take or pinned first-sample pre-bake).
+    rec_hash: dict[str, str] = {}
+    for a in attempts:
+        rec = get_recording_path(a.id)
+        if rec is None:
+            continue
+        try:
+            rec_hash[a.id] = hashlib.sha1(rec.read_bytes()).hexdigest()[:16]
+        except OSError:
+            continue
+    sample_keys = set(rec_hash.values())
+
+    latest = {}
+    for a in attempts:  # ordered by created_at → the last one wins
+        latest[a.sentence_idx] = a
+
+    items = []
+    for idx in sorted(latest):
+        a = latest[idx]
+        text = a.sentence_text.strip()
+        clone_key: str | None = None
+        if text:
+            candidates = [a.id, *sample_keys]
+            for base in candidates:
+                key = _clone_cache_key(base, text, text, lang)
+                if (COSY3_CACHE_DIR / f"{key}.wav").exists():
+                    clone_key = key
+                    break
+        items.append(
+            {
+                "sentence_idx": a.sentence_idx,
+                "text": a.sentence_text,
+                "attempt_id": a.id,
+                "overall_score": a.overall_score,
+                "created_at": a.created_at,
+                "clone_key": clone_key,
+            }
+        )
+
+    return {"video_id": video_id, "language": lang, "items": items}
 
 
 @app.get("/word_ipa")
@@ -622,3 +784,187 @@ def phoneme_audio(ipa: str, language: str = "fr-fr") -> Response:
     if data is None:
         raise HTTPException(status_code=404, detail="no audio for phone")
     return Response(content=data, media_type="audio/wav")
+
+
+# --- CosyVoice3 "my voice but standard" clone --------------------------------
+
+# The CosyVoice3 service runs one model on CPU: serialize all generations —
+# on-demand clones and background pre-baking alike — so they never pile onto
+# the model at once.
+_cosy3_lock = asyncio.Lock()
+_prebake_task: asyncio.Task | None = None
+
+
+def _clone_cache_key(base_key: str, text: str, prompt: str, lang: str) -> str:
+    # The cache key must include the target text AND language: the same
+    # recording is reused for the full-sentence clone AND per-word clones, and
+    # the same text in a different language is a different audio.
+    return hashlib.sha1(f"{base_key}|{text}|{prompt}|{lang}".encode()).hexdigest()[:16]
+
+
+async def _bake_clone(recording: Path, base_key: str, text: str, prompt: str, lang: str) -> dict:
+    """Bake one clone (cache-first) and return its URL payload."""
+    COSY3_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_key = _clone_cache_key(base_key, text, prompt, lang)
+    cache_path = COSY3_CACHE_DIR / f"{cache_key}.wav"
+    if cache_path.exists():
+        return {"url": f"/cosy_clone_audio/{cache_key}.wav", "cached": True}
+
+    payload = {
+        "target_text": text,
+        "prompt_text": prompt,
+        "ref_path": str(recording),
+        "language": lang,
+    }
+    async with _cosy3_lock:
+        if cache_path.exists():  # baked while we waited for the lock
+            return {"url": f"/cosy_clone_audio/{cache_key}.wav", "cached": True}
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                r = await client.post(f"{COSY3_BASE_URL}/clone", json=payload)
+        except httpx.ConnectError as exc:
+            logger.warning("cosy3 service unreachable at %s: %s", COSY3_BASE_URL, exc)
+            raise HTTPException(status_code=503, detail="CosyVoice3 service is not running") from exc
+        except httpx.TimeoutException as exc:
+            logger.warning("cosy3 service timed out")
+            raise HTTPException(status_code=504, detail="CosyVoice3 generation timed out") from exc
+
+        if r.status_code >= 400:
+            detail = r.text[:500]
+            logger.warning("cosy3 service returned %d: %s", r.status_code, detail)
+            raise HTTPException(status_code=r.status_code, detail=detail)
+
+        cache_path.write_bytes(r.content)
+        evicted = evict_cache(COSY3_CACHE_DIR, COSY_CACHE_MAX_BYTES)
+        if evicted:
+            logger.info("cosy3 cache eviction: removed %d old clip(s)", evicted)
+    return {
+        "url": f"/cosy_clone_audio/{cache_key}.wav",
+        "cached": True,
+    }
+
+
+def _save_sample(raw: bytes) -> tuple[Path, str]:
+    """Persist an uploaded voice sample content-addressed; return (path, key)."""
+    base_key = hashlib.sha1(raw).hexdigest()[:16]
+    recording = RECORDINGS_DIR / f"cosy3_{base_key}.webm"
+    if not recording.exists():
+        recording.write_bytes(raw)
+    return recording, base_key
+
+
+@app.post("/cosy_clone")
+async def cosy_clone(
+    attempt_id: str | None = Form(None),
+    audio: UploadFile | None = File(None),
+    target_text: str | None = Form(None),
+    prompt_text: str | None = Form(None),
+    language: str = Form(""),
+) -> dict:
+    """Clone the user's voice onto the target sentence using local CosyVoice3.
+
+    Accepts either:
+      - attempt_id: reuse a persisted recording from /attempts
+      - audio + target_text: upload the raw recording directly (parallel with analysis)
+
+    The prompt_text should be what the user actually said in the recording; it
+    tells CosyVoice3 which part of the reference audio maps to the prompt.
+    `language` pins the synthesis language via a CosyVoice3 instruct — without
+    it the model guesses, and French zero-shot clones came out sounding German.
+    """
+    recording: Path | None = None
+    base_key: str
+
+    if attempt_id:
+        attempt = get_attempt(attempt_id)
+        if attempt is None:
+            raise HTTPException(status_code=404, detail="attempt not found")
+        recording = Path(attempt.recording_path)
+        base_key = attempt_id
+        text = (target_text or attempt.sentence_text).strip()
+    elif audio:
+        raw = await audio.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="empty audio")
+        recording, base_key = _save_sample(raw)
+        if not target_text or not target_text.strip():
+            raise HTTPException(status_code=400, detail="empty target_text")
+        text = target_text.strip()
+    else:
+        raise HTTPException(status_code=400, detail="provide either attempt_id or audio")
+
+    if recording is None or not recording.exists():
+        raise HTTPException(status_code=404, detail="recording file not found")
+
+    prompt = (prompt_text or text).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="empty target_text")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="empty prompt_text")
+
+    return await _bake_clone(recording, base_key, text, prompt, language.strip().lower())
+
+
+class CosyPrebakeItem(BaseModel):
+    target_text: str
+    prompt_text: str = ""
+
+
+async def _prebake_loop(recording: Path, base_key: str, items: list[CosyPrebakeItem], lang: str) -> None:
+    """Sequentially bake clones for upcoming sentences, skipping cached ones.
+
+    Failures (service down, timeout) are logged and skipped so one bad item
+    never blocks the rest of the queue.
+    """
+    for item in items:
+        text = item.target_text.strip()
+        prompt = (item.prompt_text or item.target_text).strip()
+        if not text or not prompt:
+            continue
+        try:
+            await _bake_clone(recording, base_key, text, prompt, lang)
+        except Exception as exc:
+            logger.info("cosy prebake skipped %r: %s", text[:40], exc)
+
+
+@app.post("/cosy_prebake")
+async def cosy_prebake(
+    audio: UploadFile = File(...),
+    items: str = Form(...),
+    language: str = Form(""),
+) -> dict:
+    """Pre-bake sentence-level clones in the background from ONE voice sample.
+
+    Once the learner has recorded their first sentence, that recording is a
+    good enough voice sample for every later sentence — the clone for sentence
+    N no longer has to wait for recording N. A new pre-bake request replaces
+    the previous queue (the sample may have changed).
+    """
+    raw = await audio.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty audio")
+    try:
+        parsed = [CosyPrebakeItem(**i) for i in json.loads(items)]
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid items JSON: {exc}") from exc
+
+    recording, base_key = _save_sample(raw)
+    lang = language.strip().lower()
+    # Cap the queue: each item is one ~40s CPU generation, so an unbounded
+    # pre-bake on a long video would hog the machine for hours.
+    parsed = parsed[:COSY_PREBAKE_MAX]
+
+    global _prebake_task
+    if _prebake_task is not None and not _prebake_task.done():
+        _prebake_task.cancel()
+    _prebake_task = asyncio.create_task(_prebake_loop(recording, base_key, parsed, lang))
+    logger.info("cosy prebake queued %d items (sample %s)", len(parsed), base_key)
+    return {"queued": len(parsed)}
+
+
+@app.get("/cosy_clone_audio/{attempt_id}.wav")
+def cosy_clone_audio(attempt_id: str) -> FileResponse:
+    cache_path = COSY3_CACHE_DIR / f"{attempt_id}.wav"
+    if not cache_path.exists():
+        raise HTTPException(status_code=404, detail="cloned audio not found")
+    return FileResponse(cache_path, media_type="audio/wav", filename=f"{attempt_id}.wav")

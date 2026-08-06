@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchVideoInfo, fetchTranscript, fetchProgress } from "@/lib/api";
-import { PracticeView } from "@/components/PracticeView";
+import { fetchVideoInfo, fetchTranscript, fetchProgress, fetchRecentVideos, type RecentVideo } from "@/lib/api";
+import { PracticeView, HistoryOverlay } from "@/components/PracticeView";
 import type { Transcript, VideoInfo } from "@/lib/types";
 
 export default function Home() {
@@ -13,6 +13,8 @@ export default function Home() {
   const [info, setInfo] = useState<VideoInfo | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [startIdx, setStartIdx] = useState(0);
+  const [recent, setRecent] = useState<RecentVideo[]>([]);
+  const [historyFor, setHistoryFor] = useState<RecentVideo | null>(null);
 
   // idx: explicit sentence to open at; undefined → resume from saved progress.
   const load = useCallback(async (rawUrl: string, lang: string, idx?: number) => {
@@ -55,6 +57,11 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [load]);
 
+  // URL-as-unit practice history on the landing page.
+  useEffect(() => {
+    void fetchRecentVideos().then(setRecent);
+  }, []);
+
   if (info && transcript) {
     return (
       <PracticeView
@@ -68,7 +75,23 @@ export default function Home() {
           setTranscript(null);
           window.history.replaceState(null, "", "/");
         }}
-        onLoadUrl={(newUrl) => void load(newUrl, language)}
+        onLoadUrl={(newUrl, idx) => void load(newUrl, language, idx)}
+      />
+    );
+  }
+
+  if (historyFor) {
+    const v = historyFor;
+    return (
+      <HistoryOverlay
+        initialVideoId={v.video_id}
+        language={v.language || language}
+        closeLabel="← 返回"
+        onClose={() => setHistoryFor(null)}
+        onOpenVideo={(vid, idx) => {
+          setHistoryFor(null);
+          void load(`https://www.youtube.com/watch?v=${vid}`, v.language || language, idx);
+        }}
       />
     );
   }
@@ -98,6 +121,36 @@ export default function Home() {
         </div>
         <div className="status">{status}</div>
       </div>
+      {recent.length > 0 && (
+        <div className="card recent-card">
+          <h2>练习历史</h2>
+          <div className="recent-list">
+            {recent.map((v) => (
+              <div key={v.video_id} className="recent-row">
+                {v.thumbnail && (
+                  // eslint-disable-next-line @next/next/no-img-element -- YouTube thumbnail, next/image is unsuitable
+                  <img className="recent-thumb" src={v.thumbnail} alt="" />
+                )}
+                <div className="recent-meta">
+                  <div className="recent-title">{v.title || v.video_id}</div>
+                  <div className="recent-sub">
+                    {v.sentence_attempt_count}/{v.total_sentences} 句 · {v.attempt_count} 次跟读
+                  </div>
+                </div>
+                <button className="track-btn" onClick={() => setHistoryFor(v)}>历史</button>
+                <button
+                  className="track-btn"
+                  onClick={() =>
+                    void load(`https://www.youtube.com/watch?v=${v.video_id}`, v.language || language)
+                  }
+                >
+                  继续跟读
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

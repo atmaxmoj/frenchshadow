@@ -47,6 +47,15 @@ def available() -> bool:
     return bool(_candidate_dirs())
 
 
+def preload() -> bool:
+    """Eagerly load the Whisper model (called from the app lifespan).
+
+    First-use lazy loading takes ~15s, which once pushed /transcribe past the
+    Next.js dev-proxy timeout and surfaced as a bogus 500 to the learner.
+    """
+    return _ensure_model()
+
+
 def _ensure_model() -> bool:
     global _proc, _model, _loaded_dir
     if _model is not None:

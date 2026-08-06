@@ -29,6 +29,16 @@ python3 -m venv .venv
 
 第一次启动会从 Hugging Face 下载 `facebook/wav2vec2-lv-60-espeak-cv-ft`（约 1.2 GB）。
 
+## 配置（环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `SHADOW_READER_MODEL` | 内置路径 | wav2vec2 模型目录 |
+| `SHADOW_READER_COSY3_URL` | `http://localhost:8769` | CosyVoice3 克隆服务地址 |
+| `SHADOW_READER_COSY_PREBAKE_MAX` | `30` | 一次预烤最多排队的句子数（CPU 上限） |
+| `SHADOW_READER_COSY_CACHE_MAX_MB` | `500` | 克隆音频磁盘缓存上限，超出按最旧淘汰（主后端缓存与 cosy3 服务输出目录共用） |
+| `NEXT_PUBLIC_BACKEND_URL` | `http://localhost:8767` | 前端直连后端（长请求绕过 Next 代理） |
+
 ## 用法
 
 1. 页面加载后显示例句 *The quick brown fox jumps over the lazy dog.*

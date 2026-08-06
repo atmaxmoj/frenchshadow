@@ -68,6 +68,46 @@ export async function playUrlNormalized(url: string): Promise<void> {
   await playBlobNormalized(await res.blob());
 }
 
+// Minimal slice of HTMLAudioElement so playSequence is testable in node.
+export interface SequenceAudio {
+  play: () => Promise<void>;
+  pause: () => void;
+  onended: (() => void) | null;
+  onerror: (() => void) | null;
+}
+
+// Play URLs back-to-back (whole-video replay of the learner's takes or their
+// clones). Broken clips are skipped instead of stalling the sequence.
+// Returns a stop() function.
+export function playSequence(
+  urls: string[],
+  onProgress?: (index: number, total: number) => void,
+  onDone?: () => void,
+  createAudio?: (url: string) => SequenceAudio,
+): () => void {
+  const make = createAudio ?? ((url: string) => new Audio(url) as unknown as SequenceAudio);
+  let stopped = false;
+  let current: SequenceAudio | null = null;
+  const step = (i: number) => {
+    if (stopped) return;
+    if (i >= urls.length) {
+      onDone?.();
+      return;
+    }
+    onProgress?.(i, urls.length);
+    const a = make(urls[i]);
+    current = a;
+    a.onended = () => step(i + 1);
+    a.onerror = () => step(i + 1);
+    Promise.resolve(a.play()).catch(() => step(i + 1));
+  };
+  step(0);
+  return () => {
+    stopped = true;
+    current?.pause();
+  };
+}
+
 function writeString(view: DataView, offset: number, str: string) {
   for (let i = 0; i < str.length; i++) {
     view.setUint8(offset + i, str.charCodeAt(i));

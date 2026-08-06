@@ -501,6 +501,17 @@ button:hover:not(:disabled) {
   filter: brightness(1.06);
 }
 
+.ctl-btn.primary.recording {
+  background: var(--bad);
+  border-color: var(--bad);
+  animation: 1.1s ease-in-out infinite rec-pulse;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.12); }
+}
+
 .mid-row {
   align-items: center;
   gap: 14px;
@@ -1457,3 +1468,18 @@ button:hover:not(:disabled) {
 /* 达意 recovery: what Whisper heard, under the score header. */
 .heard-line { margin: 8px 0 0; font-size: 14px; color: var(--ink-body); text-align: center; }
 .heard-label { color: var(--ink-soft); font-size: 12px; margin-right: 6px; }
+
+/* Landing: URL-as-unit practice history list. */
+.recent-card { margin-top: 20px; padding: 24px; }
+.recent-card h2 { font-size: 18px; margin: 0 0 12px; }
+.recent-list { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow-y: auto; }
+.recent-row { display: flex; align-items: center; gap: 12px; }
+.recent-thumb { width: 72px; height: 42px; object-fit: cover; border-radius: 6px; flex: none; }
+.recent-meta { flex: 1; min-width: 0; }
+.recent-title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-sub { font-size: 12px; opacity: 0.65; }
+
+/* History overlay: whole-video replay controls in the topbar. */
+.history-replay { display: flex; gap: 8px; align-items: center; flex: 1; justify-content: center; }
+
+.recent-current { font-size: 12px; opacity: 0.6; }
